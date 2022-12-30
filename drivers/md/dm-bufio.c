@@ -105,7 +105,13 @@ struct dm_bufio_client {
 	sector_t start;
 
 	int async_write_error;
-
+	unsigned long long cntio;
+	unsigned long long cntbio;
+	unsigned long long cntbio_read;
+	unsigned long long cntbio_write;
+	unsigned long long cntbio_sort[6];
+	unsigned long long cntbio_sort_r[6];
+	int rw;
 	struct list_head client_list;
 	struct shrinker shrinker;
 };
@@ -556,6 +562,8 @@ static void use_dmio(struct dm_buffer *b, int rw, sector_t sector,
 	}
 
 	r = dm_io(&io_req, 1, &region, NULL);
+	b->c->cntio += 1;
+	DMINFO("IOcnt use dmio: %llu", b->c->cntio);
 	if (unlikely(r))
 		b->end_io(b, errno_to_blk_status(r));
 }
@@ -606,8 +614,23 @@ dmio:
 		len -= this_step;
 		ptr += this_step;
 	} while (len > 0);
-
+	DMINFO("[rw=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]", rw, (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
 	submit_bio(bio);
+	b->c->cntbio += 1;
+	if(rw == REQ_OP_WRITE) {
+		b->c->cntbio_write += 1;
+	} else if(rw == REQ_OP_READ) {
+		b->c->cntbio_read += 1;
+	}
+	DMINFO("TOTAL -> IOcnt use_bio: %8llu read: %8llu write: %8llu block: %8llx",
+			b->c->cntbio, b->c->cntbio_read, b->c->cntbio_write, (unsigned long long)b->block);
+	DMINFO("write -> s0: %8llu s1: %8llu s2: %8llu s3: %8llu s4: %8llu s5: %8llu",
+			b->c->cntbio_sort[0], b->c->cntbio_sort[1], b->c->cntbio_sort[2],
+			b->c->cntbio_sort[3], b->c->cntbio_sort[4], b->c->cntbio_sort[5]);
+	DMINFO("read  -> s0: %8llu s1: %8llu s2: %8llu s3: %8llu s4: %8llu s5: %8llu",
+			b->c->cntbio_sort_r[0], b->c->cntbio_sort_r[1], b->c->cntbio_sort_r[2],
+			b->c->cntbio_sort_r[3], b->c->cntbio_sort_r[4], b->c->cntbio_sort_r[5]);
+	
 }
 
 static void submit_io(struct dm_buffer *b, int rw, void (*end_io)(struct dm_buffer *, blk_status_t))
@@ -623,7 +646,7 @@ static void submit_io(struct dm_buffer *b, int rw, void (*end_io)(struct dm_buff
 	else
 		sector = b->block * (b->c->block_size >> SECTOR_SHIFT);
 	sector += b->c->start;
-
+	b->c->rw = rw;
 	if (rw != REQ_OP_WRITE) {
 		n_sectors = b->c->block_size >> SECTOR_SHIFT;
 		offset = 0;
@@ -1097,7 +1120,7 @@ static void *new_read(struct dm_bufio_client *c, sector_t block,
 
 	*bp = b;
 
-	return b->data;
+	return (void*)need_submit;
 }
 
 void *dm_bufio_get(struct dm_bufio_client *c, sector_t block,
@@ -1899,7 +1922,7 @@ static int __init dm_bufio_init(void)
 #endif
 
 	dm_bufio_default_cache_size = mem;
-
+	DMINFO("dm_bufio_default_cache_size = %llu", mem);
 	mutex_lock(&dm_bufio_clients_lock);
 	__cache_size_refresh();
 	mutex_unlock(&dm_bufio_clients_lock);

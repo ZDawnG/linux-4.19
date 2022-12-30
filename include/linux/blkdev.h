@@ -1093,7 +1093,7 @@ static inline unsigned int blk_rq_payload_bytes(struct request *rq)
 static inline unsigned int blk_queue_get_max_sectors(struct request_queue *q,
 						     int op)
 {
-	if (unlikely(op == REQ_OP_DISCARD || op == REQ_OP_SECURE_ERASE))
+	if (unlikely(op == REQ_OP_DISCARD || op == REQ_OP_DEDUPWRITE || op == REQ_OP_SECURE_ERASE))
 		return min(q->limits.max_discard_sectors,
 			   UINT_MAX >> SECTOR_SHIFT);
 
@@ -1130,6 +1130,7 @@ static inline unsigned int blk_rq_get_max_sectors(struct request *rq,
 
 	if (!q->limits.chunk_sectors ||
 	    req_op(rq) == REQ_OP_DISCARD ||
+		req_op(rq) == REQ_OP_DEDUPWRITE ||
 	    req_op(rq) == REQ_OP_SECURE_ERASE)
 		return blk_queue_get_max_sectors(q, req_op(rq));
 
@@ -1389,8 +1390,14 @@ extern int blkdev_issue_write_same(struct block_device *bdev, sector_t sector,
 #define BLKDEV_DISCARD_SECURE	(1 << 0)	/* issue a secure erase */
 
 extern int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
-		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags);
+		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags, unsigned int id1, unsigned int id2);
 extern int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+		sector_t nr_sects, gfp_t gfp_mask, int flags,
+		struct bio **biop, unsigned int id1, unsigned int id2);
+
+extern int blkdev_issue_remap(struct block_device *bdev, sector_t sector, sector_t sector2, unsigned int id1, unsigned int id2, unsigned int id3,
+		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags);
+extern int __blkdev_issue_remap(struct block_device *bdev, sector_t sector, sector_t sector2, unsigned int id1, unsigned int id2, unsigned int id3,
 		sector_t nr_sects, gfp_t gfp_mask, int flags,
 		struct bio **biop);
 
@@ -1411,7 +1418,7 @@ static inline int sb_issue_discard(struct super_block *sb, sector_t block,
 					      SECTOR_SHIFT),
 				    nr_blocks << (sb->s_blocksize_bits -
 						  SECTOR_SHIFT),
-				    gfp_mask, flags);
+				    gfp_mask, flags, 0, 0);
 }
 static inline int sb_issue_zeroout(struct super_block *sb, sector_t block,
 		sector_t nr_blocks, gfp_t gfp_mask)

@@ -2231,6 +2231,7 @@ static inline int blk_partition_remap(struct bio *bio)
 		if (bio_check_eod(bio, part_nr_sects_read(p)))
 			goto out;
 		bio->bi_iter.bi_sector += p->start_sect;
+		bio->bi_iter.bi_sector_2 += p->start_sect;
 		trace_block_bio_remap(bio->bi_disk->queue, bio, part_devt(p),
 				      bio->bi_iter.bi_sector - p->start_sect);
 	}
@@ -3405,7 +3406,7 @@ void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
 {
 	if (bio_has_data(bio))
 		rq->nr_phys_segments = bio_phys_segments(q, bio);
-	else if (bio_op(bio) == REQ_OP_DISCARD)
+	else if (bio_op(bio) == REQ_OP_DISCARD || bio_op(bio) == REQ_OP_DEDUPWRITE)
 		rq->nr_phys_segments = 1;
 
 	rq->__data_len = bio->bi_iter.bi_size;

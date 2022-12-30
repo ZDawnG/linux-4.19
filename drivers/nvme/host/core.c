@@ -544,6 +544,8 @@ static inline void nvme_setup_flush(struct nvme_ns *ns,
 static blk_status_t nvme_setup_discard(struct nvme_ns *ns, struct request *req,
 		struct nvme_command *cmnd)
 {
+	u64 s1 = 0, s2 = 0;
+	u32 i1 = 0, i2 = 0, i3 = 0;
 	unsigned short segments = blk_rq_nr_discard_segments(req), n = 0;
 	struct nvme_dsm_range *range;
 	struct bio *bio;
@@ -554,12 +556,22 @@ static blk_status_t nvme_setup_discard(struct nvme_ns *ns, struct request *req,
 
 	__rq_for_each_bio(bio, req) {
 		u64 slba = nvme_block_nr(ns, bio->bi_iter.bi_sector);
+		u64 slba2 = nvme_block_nr(ns, bio->bi_iter.bi_sector_2);
+		u32 id1 = bio->bi_iter.bi_ssdno;
+		u32 id2 = bio->bi_iter.bi_ssdno_2;
+		u32 id3 = bio->bi_iter.bi_ssdno_3;
 		u32 nlb = bio->bi_iter.bi_size >> ns->lba_shift;
 
+		printk(KERN_INFO "slba=%llx slab2=%llx id1=%x id2=%x id3=%x nlb=%x n=%u\n", slba, slba2, id1, id2, id3, nlb, segments);
 		if (n < segments) {
-			range[n].cattr = cpu_to_le32(0);
+			range[n].cattr = cpu_to_le32((u32)slba2);
 			range[n].nlb = cpu_to_le32(nlb);
 			range[n].slba = cpu_to_le64(slba);
+			s1 = slba;
+			s2 = slba2;
+			i1 = id1;
+			i2 = id2;
+			i3 = id3;
 		}
 		n++;
 	}
@@ -574,6 +586,11 @@ static blk_status_t nvme_setup_discard(struct nvme_ns *ns, struct request *req,
 	cmnd->dsm.nsid = cpu_to_le32(ns->head->ns_id);
 	cmnd->dsm.nr = cpu_to_le32(segments - 1);
 	cmnd->dsm.attributes = cpu_to_le32(NVME_DSMGMT_AD);
+	cmnd->dsm.rsvd2[0] = s1;
+	cmnd->dsm.rsvd2[1] = s2;
+	cmnd->dsm.rsvd12[0] = i1;
+	cmnd->dsm.rsvd12[1] = i2;
+	cmnd->dsm.rsvd12[2] = i3;
 
 	req->special_vec.bv_page = virt_to_page(range);
 	req->special_vec.bv_offset = offset_in_page(range);
@@ -642,7 +659,7 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 
 void nvme_cleanup_cmd(struct request *req)
 {
-	if (blk_integrity_rq(req) && req_op(req) == REQ_OP_READ &&
+	if (blk_integrity_rq(req) && (req_op(req) == REQ_OP_READ || req_op(req) == REQ_OP_REMOTEREAD) &&
 	    nvme_req(req)->status == 0) {
 		struct nvme_ns *ns = req->rq_disk->private_data;
 
@@ -674,11 +691,19 @@ blk_status_t nvme_setup_cmd(struct nvme_ns *ns, struct request *req,
 	case REQ_OP_WRITE_ZEROES:
 		/* currently only aliased to deallocate for a few ctrls: */
 	case REQ_OP_DISCARD:
+	case REQ_OP_DEDUPWRITE:
 		ret = nvme_setup_discard(ns, req, cmd);
+		if(req_op(req) == REQ_OP_DEDUPWRITE)
+			cmd->dsm.opcode = nvme_cmd_dedupwrite;
 		break;
+	case REQ_OP_REMOTEREAD:
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
 		ret = nvme_setup_rw(ns, req, cmd);
+		if(req_op(req) == REQ_OP_REMOTEREAD) {
+			cmd->rw.opcode = nvme_cmd_remoteread;
+			cmd->rw.rsvd2 = req->write_hint;
+		}
 		break;
 	default:
 		WARN_ON_ONCE(1);

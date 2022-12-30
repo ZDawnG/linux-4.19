@@ -2020,7 +2020,7 @@ static long blkdev_fallocate(struct file *file, int mode, loff_t start,
 		break;
 	case FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE | FALLOC_FL_NO_HIDE_STALE:
 		error = blkdev_issue_discard(bdev, start >> 9, len >> 9,
-					     GFP_KERNEL, 0);
+					     GFP_KERNEL, 0, 0, 0);
 		break;
 	default:
 		return -EOPNOTSUPP;

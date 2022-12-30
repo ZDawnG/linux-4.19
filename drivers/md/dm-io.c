@@ -383,6 +383,7 @@ static void do_region(int op, int op_flags, unsigned region,
 		}
 
 		atomic_inc(&io->count);
+		DMINFO("[op=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]", op, (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
 		submit_bio(bio);
 	} while (remaining);
 }

@@ -553,11 +553,11 @@ static int __format_metadata(struct dm_pool_metadata *pmd)
 
 	__setup_btree_details(pmd);
 
-	r = dm_btree_empty(&pmd->info, &pmd->root);
+	r = dm_btree_empty(&pmd->info, &pmd->root, 0);
 	if (r < 0)
 		goto bad_cleanup_nb_tm;
 
-	r = dm_btree_empty(&pmd->details_info, &pmd->details_root);
+	r = dm_btree_empty(&pmd->details_info, &pmd->details_root, 0);
 	if (r < 0) {
 		DMERR("couldn't create devices root");
 		goto bad_cleanup_nb_tm;
@@ -1002,7 +1002,7 @@ static int __create_thin(struct dm_pool_metadata *pmd,
 	/*
 	 * Create an empty btree for the mappings.
 	 */
-	r = dm_btree_empty(&pmd->bl_info, &dev_root);
+	r = dm_btree_empty(&pmd->bl_info, &dev_root, 0);
 	if (r)
 		return r;
 

@@ -9,7 +9,19 @@
 
 #include <linux/bitops.h>
 #include <linux/device-mapper.h>
+#include <linux/dm-io.h>
+#include <linux/slab.h>
+#include <linux/sched/mm.h>
+#include <linux/jiffies.h>
+#include <linux/vmalloc.h>
+#include <linux/shrinker.h>
+#include <linux/module.h>
+#include <linux/rbtree.h>
+#include <linux/stacktrace.h>
+#define LIST_SIZE	2
 
+struct dm_bufio_client;
+struct dm_buffer;
 #define DM_MSG_PREFIX "space map common"
 
 /*----------------------------------------------------------------*/
@@ -19,12 +31,81 @@
  */
 #define INDEX_CSUM_XOR 160478
 
+struct dm_bufio_client {
+	struct mutex lock;
+
+	struct list_head lru[LIST_SIZE];
+	unsigned long n_buffers[LIST_SIZE];
+
+	struct block_device *bdev;
+	unsigned block_size;
+	s8 sectors_per_block_bits;
+	void (*alloc_callback)(struct dm_buffer *);
+	void (*write_callback)(struct dm_buffer *);
+
+	struct kmem_cache *slab_buffer;
+	struct kmem_cache *slab_cache;
+	struct dm_io_client *dm_io;
+
+	struct list_head reserved_buffers;
+	unsigned need_reserved_buffers;
+
+	unsigned minimum_buffers;
+
+	struct rb_root buffer_tree;
+	wait_queue_head_t free_buffer_wait;
+
+	sector_t start;
+
+	int async_write_error;
+	unsigned long long cntio;
+	unsigned long long cntbio;
+	unsigned long long cntbio_read;
+	unsigned long long cntbio_write;
+	unsigned long long cntbio_sort[6];
+	unsigned long long cntbio_sort_r[6];
+	int rw;
+	struct list_head client_list;
+	struct shrinker shrinker;
+};
+
+struct dm_buffer {
+	struct rb_node node;
+	struct list_head lru_list;
+	sector_t block;
+	void *data;
+	unsigned char data_mode;		/* DATA_MODE_* */
+	unsigned char list_mode;		/* LIST_* */
+	blk_status_t read_error;
+	blk_status_t write_error;
+	unsigned hold_count;
+	unsigned long state;
+	unsigned long last_accessed;
+	unsigned dirty_start;
+	unsigned dirty_end;
+	unsigned write_start;
+	unsigned write_end;
+	struct dm_bufio_client *c;
+	struct list_head write_list;
+	void (*end_io)(struct dm_buffer *, blk_status_t);
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+#define MAX_STACK 10
+	struct stack_trace stack_trace;
+	unsigned long stack_entries[MAX_STACK];
+#endif
+};
+
 static void index_prepare_for_write(struct dm_block_validator *v,
 				    struct dm_block *b,
 				    size_t block_size)
 {
 	struct disk_metadata_index *mi_le = dm_block_data(b);
-
+	struct dm_bufio_client *c = ((struct dm_buffer *)b)->c;
+	if(c->rw != 1) {
+		c->cntbio_sort_r[0] += 1;
+		return;
+	}
+	c->cntbio_sort[0] += 1;
 	mi_le->blocknr = cpu_to_le64(dm_block_location(b));
 	mi_le->csum = cpu_to_le32(dm_bm_checksum(&mi_le->padding,
 						 block_size - sizeof(__le32),
@@ -74,7 +155,12 @@ static void dm_bitmap_prepare_for_write(struct dm_block_validator *v,
 					size_t block_size)
 {
 	struct disk_bitmap_header *disk_header = dm_block_data(b);
-
+	struct dm_bufio_client *c = ((struct dm_buffer *)b)->c;
+	if(c->rw != 1) {
+		c->cntbio_sort_r[0] += 1;
+		return;
+	}
+	c->cntbio_sort[0] += 1;
 	disk_header->blocknr = cpu_to_le64(dm_block_location(b));
 	disk_header->csum = cpu_to_le32(dm_bm_checksum(&disk_header->not_used,
 						       block_size - sizeof(__le32),
@@ -615,7 +701,7 @@ int sm_ll_new_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	if (r < 0)
 		return r;
 
-	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root);
+	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root, 4);
 	if (r < 0)
 		return r;
 
@@ -676,7 +762,7 @@ static int disk_ll_save_ie(struct ll_disk *ll, dm_block_t index,
 
 static int disk_ll_init_index(struct ll_disk *ll)
 {
-	return dm_btree_empty(&ll->bitmap_info, &ll->bitmap_root);
+	return dm_btree_empty(&ll->bitmap_info, &ll->bitmap_root, 3);
 }
 
 static int disk_ll_open(struct ll_disk *ll)
@@ -717,7 +803,7 @@ int sm_ll_new_disk(struct ll_disk *ll, struct dm_transaction_manager *tm)
 	if (r < 0)
 		return r;
 
-	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root);
+	r = dm_btree_empty(&ll->ref_count_info, &ll->ref_count_root,3);
 	if (r < 0)
 		return r;
 

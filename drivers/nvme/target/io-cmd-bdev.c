@@ -139,7 +139,7 @@ static u16 nvmet_bdev_discard_range(struct nvmet_ns *ns,
 	ret = __blkdev_issue_discard(ns->bdev,
 			le64_to_cpu(range->slba) << (ns->blksize_shift - 9),
 			le32_to_cpu(range->nlb) << (ns->blksize_shift - 9),
-			GFP_KERNEL, 0, bio);
+			GFP_KERNEL, 0, bio, 0, 0);
 	if (ret && ret != -EOPNOTSUPP)
 		return NVME_SC_INTERNAL | NVME_SC_DNR;
 	return 0;

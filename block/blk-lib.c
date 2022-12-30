@@ -23,9 +23,120 @@ static struct bio *next_bio(struct bio *bio, unsigned int nr_pages,
 	return new;
 }
 
-int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+int __blkdev_issue_remap(struct block_device *bdev, sector_t sector, sector_t sector2, unsigned int id1, unsigned int id2, unsigned int id3,
 		sector_t nr_sects, gfp_t gfp_mask, int flags,
 		struct bio **biop)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	struct bio *bio = *biop;
+	unsigned int op;
+	sector_t bs_mask;
+
+	if (!q)
+		return -ENXIO;
+
+	if (bdev_read_only(bdev))
+		return -EPERM;
+
+	if (flags & BLKDEV_DISCARD_SECURE) {
+		if (!blk_queue_secure_erase(q))
+			return -EOPNOTSUPP;
+		op = REQ_OP_SECURE_ERASE;
+	} else {
+		if (!blk_queue_discard(q))
+			return -EOPNOTSUPP;
+		op = REQ_OP_DEDUPWRITE;
+	}
+
+	bs_mask = (bdev_logical_block_size(bdev) >> 9) - 1;
+	if ((sector | nr_sects) & bs_mask)
+		return -EINVAL;
+
+	while (nr_sects) {
+		unsigned int req_sects = nr_sects;
+		sector_t end_sect;
+
+		if (!req_sects)
+			goto fail;
+		if (req_sects > UINT_MAX >> 9)
+			req_sects = UINT_MAX >> 9;
+
+		end_sect = sector + req_sects;
+
+		bio = next_bio(bio, 0, gfp_mask);
+		bio->bi_iter.bi_sector = sector;
+		bio->bi_iter.bi_sector_2 = sector2;
+		bio->bi_iter.bi_ssdno = id1;
+		bio->bi_iter.bi_ssdno_2 = id2;
+		bio->bi_iter.bi_ssdno_3 = id3;
+		bio_set_dev(bio, bdev);
+		bio_set_op_attrs(bio, op, 0);
+
+		bio->bi_iter.bi_size = req_sects << 9;
+		nr_sects -= req_sects;
+		sector = end_sect;
+
+		printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_sector2=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
+			(unsigned long long)bio->bi_iter.bi_sector, (unsigned long long)bio->bi_iter.bi_sector_2, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
+		/*
+		 * We can loop for a long time in here, if someone does
+		 * full device discards (like mkfs). Be nice and allow
+		 * us to schedule out to avoid softlocking if preempt
+		 * is disabled.
+		 */
+		cond_resched();
+	}
+
+	*biop = bio;
+	return 0;
+
+fail:
+	if (bio) {
+		submit_bio_wait(bio);
+		bio_put(bio);
+	}
+	*biop = NULL;
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL(__blkdev_issue_remap);
+
+/**
+ * blkdev_issue_remap - queue a discard
+ * @bdev:	blockdev to issue discard for
+ * @sector:	start sector
+ * @sector2:	start sector2
+ * @nr_sects:	number of sectors to discard
+ * @gfp_mask:	memory allocation flags (for bio_alloc)
+ * @flags:	BLKDEV_DISCARD_* flags to control behaviour
+ *
+ * Description:
+ *    Issue a discard request for the sectors in question.
+ */
+int blkdev_issue_remap(struct block_device *bdev, sector_t sector, sector_t sector2, unsigned int id1, unsigned int id2, unsigned int id3,
+		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags)
+{
+	struct bio *bio = NULL;
+	struct blk_plug plug;
+	int ret;
+
+	blk_start_plug(&plug);
+	ret = __blkdev_issue_remap(bdev, sector, sector2, id1, id2, id3, nr_sects, gfp_mask, flags,
+			&bio);
+	if (!ret && bio) {
+		ret = submit_bio_wait(bio);
+		if (ret == -EOPNOTSUPP)
+			ret = 0;
+		bio_put(bio);
+	}
+	blk_finish_plug(&plug);
+
+	return ret;
+}
+EXPORT_SYMBOL(blkdev_issue_remap);
+
+int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+		sector_t nr_sects, gfp_t gfp_mask, int flags,
+		struct bio **biop, unsigned int id1, unsigned int id2)
 {
 	struct request_queue *q = bdev_get_queue(bdev);
 	struct bio *bio = *biop;
@@ -65,6 +176,8 @@ int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 
 		bio = next_bio(bio, 0, gfp_mask);
 		bio->bi_iter.bi_sector = sector;
+		bio->bi_iter.bi_ssdno = id1;
+		bio->bi_iter.bi_ssdno_2 = id2;
 		bio_set_dev(bio, bdev);
 		bio_set_op_attrs(bio, op, 0);
 
@@ -72,6 +185,8 @@ int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 		nr_sects -= req_sects;
 		sector = end_sect;
 
+		printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
+			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
 		/*
 		 * We can loop for a long time in here, if someone does
 		 * full device discards (like mkfs). Be nice and allow
@@ -106,7 +221,7 @@ EXPORT_SYMBOL(__blkdev_issue_discard);
  *    Issue a discard request for the sectors in question.
  */
 int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
-		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags)
+		sector_t nr_sects, gfp_t gfp_mask, unsigned long flags, unsigned int id1, unsigned int id2)
 {
 	struct bio *bio = NULL;
 	struct blk_plug plug;
@@ -114,7 +229,7 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 
 	blk_start_plug(&plug);
 	ret = __blkdev_issue_discard(bdev, sector, nr_sects, gfp_mask, flags,
-			&bio);
+			&bio, id1, id2);
 	if (!ret && bio) {
 		ret = submit_bio_wait(bio);
 		if (ret == -EOPNOTSUPP)

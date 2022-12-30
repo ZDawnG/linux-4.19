@@ -36,6 +36,10 @@ struct bio_vec {
 struct bvec_iter {
 	sector_t		bi_sector;	/* device address in 512 byte
 						   sectors */
+	sector_t		bi_sector_2;
+	unsigned int		bi_ssdno;
+	unsigned int		bi_ssdno_2;
+	unsigned int		bi_ssdno_3;
 	unsigned int		bi_size;	/* residual I/O count */
 
 	unsigned int		bi_idx;		/* current index into bvl_vec */
@@ -129,6 +133,10 @@ static inline bool bvec_iter_rewind(const struct bio_vec *bv,
 #define BVEC_ITER_ALL_INIT (struct bvec_iter)				\
 {									\
 	.bi_sector	= 0,						\
+	.bi_sector_2 = 0,						\
+	.bi_ssdno = 0,							\
+	.bi_ssdno_2 = 0,						\
+	.bi_ssdno_3 = 0,						\
 	.bi_size	= UINT_MAX,					\
 	.bi_idx		= 0,						\
 	.bi_bvec_done	= 0,						\

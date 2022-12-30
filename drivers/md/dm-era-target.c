@@ -439,7 +439,7 @@ static int create_fresh_metadata(struct era_metadata *md)
 
 	setup_infos(md);
 
-	r = dm_btree_empty(&md->writeset_tree_info, &md->writeset_tree_root);
+	r = dm_btree_empty(&md->writeset_tree_info, &md->writeset_tree_root, 0);
 	if (r) {
 		DMERR("couldn't create new writeset tree");
 		goto bad;

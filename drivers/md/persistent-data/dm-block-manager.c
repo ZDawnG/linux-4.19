@@ -459,9 +459,11 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 {
 	struct buffer_aux *aux;
 	void *p;
-	int r;
+	int r, need_submit;
 
 	p = dm_bufio_read(bm->bufio, b, (struct dm_buffer **) result);
+	need_submit = (int)p;
+	p = dm_bufio_get_block_data(to_buffer(*result));
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
@@ -481,6 +483,10 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
+	if(need_submit && v) {
+		v->prepare_for_write(v, *result,
+			dm_bufio_get_block_size(dm_bufio_get_client(to_buffer(*result))));
+	}
 
 	return 0;
 }
@@ -492,12 +498,14 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 {
 	struct buffer_aux *aux;
 	void *p;
-	int r;
+	int r, need_submit;
 
 	if (bm->read_only)
 		return -EPERM;
 
 	p = dm_bufio_read(bm->bufio, b, (struct dm_buffer **) result);
+	need_submit = (int)p;
+	p = dm_bufio_get_block_data(to_buffer(*result));
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 
@@ -517,7 +525,10 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
-
+	if(need_submit && v) {
+		v->prepare_for_write(v, *result,
+			dm_bufio_get_block_size(dm_bufio_get_client(to_buffer(*result))));
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dm_bm_write_lock);
@@ -528,9 +539,11 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 {
 	struct buffer_aux *aux;
 	void *p;
-	int r;
+	int r, need_submit;
 
 	p = dm_bufio_get(bm->bufio, b, (struct dm_buffer **) result);
+	need_submit = (int)p;
+	p = dm_bufio_get_block_data(to_buffer(*result));
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 	if (unlikely(!p))
@@ -551,7 +564,10 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 		dm_bufio_release(to_buffer(*result));
 		return r;
 	}
-
+	if(need_submit && v) {
+		v->prepare_for_write(v, *result,
+			dm_bufio_get_block_size(dm_bufio_get_client(to_buffer(*result))));
+	}
 	return 0;
 }
 
@@ -567,6 +583,7 @@ int dm_bm_write_lock_zero(struct dm_block_manager *bm,
 		return -EPERM;
 
 	p = dm_bufio_new(bm->bufio, b, (struct dm_buffer **) result);
+	p = dm_bufio_get_block_data(to_buffer(*result));
 	if (unlikely(IS_ERR(p)))
 		return PTR_ERR(p);
 

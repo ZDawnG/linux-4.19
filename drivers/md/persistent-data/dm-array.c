@@ -648,7 +648,7 @@ EXPORT_SYMBOL_GPL(dm_array_info_init);
 
 int dm_array_empty(struct dm_array_info *info, dm_block_t *root)
 {
-	return dm_btree_empty(&info->btree_info, root);
+	return dm_btree_empty(&info->btree_info, root, 0);
 }
 EXPORT_SYMBOL_GPL(dm_array_empty);
 

@@ -1103,7 +1103,7 @@ int nilfs_sufile_trim_fs(struct inode *sufile, struct fstrim_range *range)
 				ret = blkdev_issue_discard(nilfs->ns_bdev,
 						start * sects_per_block,
 						nblocks * sects_per_block,
-						GFP_NOFS, 0);
+						GFP_NOFS, 0, 0, 0);
 				if (ret < 0) {
 					put_bh(su_bh);
 					goto out_sem;
@@ -1137,7 +1137,7 @@ int nilfs_sufile_trim_fs(struct inode *sufile, struct fstrim_range *range)
 			ret = blkdev_issue_discard(nilfs->ns_bdev,
 					start * sects_per_block,
 					nblocks * sects_per_block,
-					GFP_NOFS, 0);
+					GFP_NOFS, 0, 0, 0);
 			if (!ret)
 				ndiscarded += nblocks;
 		}

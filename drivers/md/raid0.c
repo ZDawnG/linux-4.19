@@ -383,7 +383,7 @@ static int raid0_run(struct mddev *mddev)
 	conf = mddev->private;
 	if (mddev->queue) {
 		struct md_rdev *rdev;
-		bool discard_supported = false;
+		bool discard_supported = true;
 
 		blk_queue_max_hw_sectors(mddev->queue, mddev->chunk_sectors);
 		blk_queue_max_write_same_sectors(mddev->queue, mddev->chunk_sectors);
@@ -538,6 +538,122 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 			conf->strip_zone[0].nb_dev + disk];
 		if (__blkdev_issue_discard(rdev->bdev,
 			dev_start + zone->dev_start + rdev->data_offset,
+			dev_end - dev_start, GFP_NOIO, 0, &discard_bio, bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2) ||
+		    !discard_bio)
+			continue;
+		bio_chain(discard_bio, bio);
+		bio_clone_blkcg_association(discard_bio, bio);
+		if (mddev->gendisk)
+			trace_block_bio_remap(bdev_get_queue(rdev->bdev),
+				discard_bio, disk_devt(mddev->gendisk),
+				bio->bi_iter.bi_sector);
+		generic_make_request(discard_bio);
+	}
+	bio_endio(bio);
+}
+
+static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
+{
+	struct r0conf *conf = mddev->private;
+	struct strip_zone *zone;
+	sector_t start = bio->bi_iter.bi_sector;
+	sector_t end;
+	unsigned int stripe_size;
+	sector_t first_stripe_index, last_stripe_index;
+	sector_t start_disk_offset;
+	unsigned int start_disk_index;
+	sector_t end_disk_offset;
+	unsigned int end_disk_index;
+
+	sector_t start2 = bio->bi_iter.bi_sector_2;
+	sector_t end2;
+	sector_t first_stripe_index2, last_stripe_index2;
+	sector_t start_disk_offset2;
+	unsigned int start_disk_index2;
+	sector_t end_disk_offset2;
+	unsigned int end_disk_index2;
+
+	unsigned int disk;
+
+	zone = find_zone(conf, &start);
+
+	if (bio_end_sector(bio) > zone->zone_end) {
+		struct bio *split = bio_split(bio,
+			zone->zone_end - bio->bi_iter.bi_sector, GFP_NOIO,
+			&mddev->bio_set);
+		bio_chain(split, bio);
+		generic_make_request(bio);
+		bio = split;
+		end = zone->zone_end;
+	} else
+		end = bio_end_sector(bio);
+
+	if (zone != conf->strip_zone)
+		end = end - zone[-1].zone_end;
+
+	/* Now start and end is the offset in zone */
+	stripe_size = zone->nb_dev * mddev->chunk_sectors;
+
+	first_stripe_index = start;
+	sector_div(first_stripe_index, stripe_size);
+	last_stripe_index = end;
+	sector_div(last_stripe_index, stripe_size);
+
+	end2 = bio->bi_iter.bi_sector_2 + (bio->bi_iter.bi_size >> 9);
+	first_stripe_index2 = start2;
+	sector_div(first_stripe_index2, stripe_size);
+	last_stripe_index2 = end2;
+	sector_div(last_stripe_index2, stripe_size);
+
+	start_disk_index = (int)(start - first_stripe_index * stripe_size) /
+		mddev->chunk_sectors;
+	start_disk_offset = ((int)(start - first_stripe_index * stripe_size) %
+		mddev->chunk_sectors) +
+		first_stripe_index * mddev->chunk_sectors;
+	end_disk_index = (int)(end - last_stripe_index * stripe_size) /
+		mddev->chunk_sectors;
+	end_disk_offset = ((int)(end - last_stripe_index * stripe_size) %
+		mddev->chunk_sectors) +
+		last_stripe_index * mddev->chunk_sectors;
+
+	start_disk_index2 = (int)(start2 - first_stripe_index2 * stripe_size) /
+		mddev->chunk_sectors;
+	start_disk_offset2 = ((int)(start2 - first_stripe_index2 * stripe_size) %
+		mddev->chunk_sectors) +
+		first_stripe_index2 * mddev->chunk_sectors;
+	
+	for (disk = 0; disk < zone->nb_dev; disk++) {
+		sector_t dev_start, dev_end;
+		sector_t dev_start2, dev_end2;
+		struct bio *discard_bio = NULL;
+		struct md_rdev *rdev;
+
+		if (disk < start_disk_index)
+			dev_start = (first_stripe_index + 1) *
+				mddev->chunk_sectors;
+		else if (disk > start_disk_index)
+			dev_start = first_stripe_index * mddev->chunk_sectors;
+		else
+			dev_start = start_disk_offset;
+
+		if (disk < end_disk_index)
+			dev_end = (last_stripe_index + 1) * mddev->chunk_sectors;
+		else if (disk > end_disk_index)
+			dev_end = last_stripe_index * mddev->chunk_sectors;
+		else
+			dev_end = end_disk_offset;
+
+		if (dev_end <= dev_start)
+			continue;
+
+		dev_start2 = start_disk_offset2;
+
+		rdev = conf->devlist[(zone - conf->strip_zone) *
+			conf->strip_zone[0].nb_dev + disk];
+		if (__blkdev_issue_remap(rdev->bdev,
+			dev_start + zone->dev_start + rdev->data_offset,
+			dev_start2 + zone->dev_start + rdev->data_offset,
+			bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2, bio->bi_iter.bi_ssdno_3,
 			dev_end - dev_start, GFP_NOIO, 0, &discard_bio) ||
 		    !discard_bio)
 			continue;
@@ -552,6 +668,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 	bio_endio(bio);
 }
 
+
 static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 {
 	struct strip_zone *zone;
@@ -561,6 +678,9 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	unsigned chunk_sects;
 	unsigned sectors;
 
+	printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][chunksector=%d][blk_name=%s]\n", bio->bi_opf, \
+			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, mddev->chunk_sectors, bio->bi_disk->disk_name);
+
 	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);
 		return true;
@@ -568,6 +688,11 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD))) {
 		raid0_handle_discard(mddev, bio);
+		return true;
+	}
+
+	if (unlikely((bio_op(bio) == REQ_OP_DEDUPWRITE))) {
+		raid0_handle_remap(mddev, bio);
 		return true;
 	}
 

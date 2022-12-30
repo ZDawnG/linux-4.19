@@ -88,6 +88,7 @@ static inline bool bio_has_data(struct bio *bio)
 	if (bio &&
 	    bio->bi_iter.bi_size &&
 	    bio_op(bio) != REQ_OP_DISCARD &&
+		bio_op(bio) != REQ_OP_DEDUPWRITE &&
 	    bio_op(bio) != REQ_OP_SECURE_ERASE &&
 	    bio_op(bio) != REQ_OP_WRITE_ZEROES)
 		return true;
@@ -98,6 +99,7 @@ static inline bool bio_has_data(struct bio *bio)
 static inline bool bio_no_advance_iter(struct bio *bio)
 {
 	return bio_op(bio) == REQ_OP_DISCARD ||
+		   bio_op(bio) == REQ_OP_DEDUPWRITE ||
 	       bio_op(bio) == REQ_OP_SECURE_ERASE ||
 	       bio_op(bio) == REQ_OP_WRITE_SAME ||
 	       bio_op(bio) == REQ_OP_WRITE_ZEROES;
@@ -217,6 +219,7 @@ static inline unsigned bio_segments(struct bio *bio)
 
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
+	case REQ_OP_DEDUPWRITE:
 	case REQ_OP_SECURE_ERASE:
 	case REQ_OP_WRITE_ZEROES:
 		return 0;

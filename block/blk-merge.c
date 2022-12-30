@@ -187,8 +187,10 @@ void blk_queue_split(struct request_queue *q, struct bio **bio)
 
 	switch (bio_op(*bio)) {
 	case REQ_OP_DISCARD:
+	case REQ_OP_DEDUPWRITE:
 	case REQ_OP_SECURE_ERASE:
 		split = blk_bio_discard_split(q, *bio, &q->bio_split, &nsegs);
+		if(split) printk(KERN_INFO "blk_bio_discard_split");
 		break;
 	case REQ_OP_WRITE_ZEROES:
 		split = blk_bio_write_zeroes_split(q, *bio, &q->bio_split, &nsegs);
@@ -243,6 +245,7 @@ static unsigned int __blk_recalc_rq_segments(struct request_queue *q,
 
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
+	case REQ_OP_DEDUPWRITE:
 	case REQ_OP_SECURE_ERASE:
 	case REQ_OP_WRITE_ZEROES:
 		return 0;
@@ -842,6 +845,8 @@ bool blk_rq_merge_ok(struct request *rq, struct bio *bio)
 
 enum elv_merge blk_try_merge(struct request *rq, struct bio *bio)
 {
+	if (req_op(rq) == REQ_OP_DEDUPWRITE)
+		return ELEVATOR_NO_MERGE;
 	if (req_op(rq) == REQ_OP_DISCARD &&
 	    queue_max_discard_segments(rq->q) > 1)
 		return ELEVATOR_DISCARD_MERGE;

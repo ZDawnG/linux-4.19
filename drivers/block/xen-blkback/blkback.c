@@ -1033,7 +1033,7 @@ static int dispatch_discard_io(struct xen_blkif_ring *ring,
 
 	err = blkdev_issue_discard(bdev, req->u.discard.sector_number,
 				   req->u.discard.nr_sectors,
-				   GFP_KERNEL, secure);
+				   GFP_KERNEL, secure, 0, 0);
 fail_response:
 	if (err == -EOPNOTSUPP) {
 		pr_debug("discard op failed, not supported\n");
