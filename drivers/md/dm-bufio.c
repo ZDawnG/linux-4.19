@@ -336,6 +336,7 @@ static void __cache_size_refresh(void)
 
 	dm_bufio_cache_size_per_client = dm_bufio_cache_size_latch /
 					 (dm_bufio_client_count ? : 1);
+	DMINFO("dm_bufio_cache_size = %lu, dm_bufio_cache_size_per_client = %lu", dm_bufio_cache_size, dm_bufio_cache_size_per_client);
 }
 
 /*
