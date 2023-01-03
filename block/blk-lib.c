@@ -76,8 +76,8 @@ int __blkdev_issue_remap(struct block_device *bdev, sector_t sector, sector_t se
 		nr_sects -= req_sects;
 		sector = end_sect;
 
-		//printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_sector2=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
-		//	(unsigned long long)bio->bi_iter.bi_sector, (unsigned long long)bio->bi_iter.bi_sector_2, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
+		/* printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_sector2=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
+			(unsigned long long)bio->bi_iter.bi_sector, (unsigned long long)bio->bi_iter.bi_sector_2, bio->bi_iter.bi_size, bio->bi_disk->disk_name); */
 		/*
 		 * We can loop for a long time in here, if someone does
 		 * full device discards (like mkfs). Be nice and allow
@@ -185,8 +185,8 @@ int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 		nr_sects -= req_sects;
 		sector = end_sect;
 
-		//printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
-		//	(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
+		/* printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]\n", op, \
+			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name); */
 		/*
 		 * We can loop for a long time in here, if someone does
 		 * full device discards (like mkfs). Be nice and allow
