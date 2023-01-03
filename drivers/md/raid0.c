@@ -678,8 +678,8 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	unsigned chunk_sects;
 	unsigned sectors;
 
-	printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][chunksector=%d][blk_name=%s]\n", bio->bi_opf, \
-			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, mddev->chunk_sectors, bio->bi_disk->disk_name);
+	//printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][chunksector=%d][blk_name=%s]\n", bio->bi_opf, \
+	//		(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, mddev->chunk_sectors, bio->bi_disk->disk_name);
 
 	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);

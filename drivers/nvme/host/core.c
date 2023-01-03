@@ -562,7 +562,7 @@ static blk_status_t nvme_setup_discard(struct nvme_ns *ns, struct request *req,
 		u32 id3 = bio->bi_iter.bi_ssdno_3;
 		u32 nlb = bio->bi_iter.bi_size >> ns->lba_shift;
 
-		printk(KERN_INFO "slba=%llx slab2=%llx id1=%x id2=%x id3=%x nlb=%x n=%u\n", slba, slba2, id1, id2, id3, nlb, segments);
+		//printk(KERN_INFO "slba=%llx slab2=%llx id1=%x id2=%x id3=%x nlb=%x n=%u\n", slba, slba2, id1, id2, id3, nlb, segments);
 		if (n < segments) {
 			range[n].cattr = cpu_to_le32((u32)slba2);
 			range[n].nlb = cpu_to_le32(nlb);
