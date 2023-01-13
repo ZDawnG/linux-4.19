@@ -37,11 +37,82 @@ struct array_block {
  */
 #define CSUM_XOR 595846735
 
+#define LIST_SIZE	2
+struct dm_bufio_client {
+	struct mutex lock;
+
+	struct list_head lru[LIST_SIZE];
+	unsigned long n_buffers[LIST_SIZE];
+
+	struct block_device *bdev;
+	unsigned block_size;
+	s8 sectors_per_block_bits;
+	void (*alloc_callback)(struct dm_buffer *);
+	void (*write_callback)(struct dm_buffer *);
+
+	struct kmem_cache *slab_buffer;
+	struct kmem_cache *slab_cache;
+	struct dm_io_client *dm_io;
+
+	struct list_head reserved_buffers;
+	unsigned need_reserved_buffers;
+
+	unsigned minimum_buffers;
+
+	struct rb_root buffer_tree;
+	wait_queue_head_t free_buffer_wait;
+
+	sector_t start;
+
+	int async_write_error;
+	unsigned long long cntio;
+	unsigned long long cntbio;
+	unsigned long long cntbio_read;
+	unsigned long long cntbio_write;
+	unsigned long long cntbio_sort[6];
+	unsigned long long cntbio_sort_r[6];
+	int rw;
+	struct list_head client_list;
+	struct shrinker shrinker;
+};
+
+struct dm_buffer {
+	struct rb_node node;
+	struct list_head lru_list;
+	sector_t block;
+	void *data;
+	unsigned char data_mode;		/* DATA_MODE_* */
+	unsigned char list_mode;		/* LIST_* */
+	blk_status_t read_error;
+	blk_status_t write_error;
+	unsigned hold_count;
+	unsigned long state;
+	unsigned long last_accessed;
+	unsigned dirty_start;
+	unsigned dirty_end;
+	unsigned write_start;
+	unsigned write_end;
+	struct dm_bufio_client *c;
+	struct list_head write_list;
+	void (*end_io)(struct dm_buffer *, blk_status_t);
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+#define MAX_STACK 10
+	struct stack_trace stack_trace;
+	unsigned long stack_entries[MAX_STACK];
+#endif
+};
+
 static void array_block_prepare_for_write(struct dm_block_validator *v,
 					  struct dm_block *b,
 					  size_t size_of_block)
 {
 	struct array_block *bh_le = dm_block_data(b);
+	struct dm_bufio_client *c = ((struct dm_buffer *)b)->c;
+	if(c->rw != 1) {
+		c->cntbio_sort_r[5] += 1;
+		return;
+	}
+	c->cntbio_sort[5] += 1;
 
 	bh_le->blocknr = cpu_to_le64(dm_block_location(b));
 	bh_le->csum = cpu_to_le32(dm_bm_checksum(&bh_le->max_entries,
@@ -648,7 +719,7 @@ EXPORT_SYMBOL_GPL(dm_array_info_init);
 
 int dm_array_empty(struct dm_array_info *info, dm_block_t *root)
 {
-	return dm_btree_empty(&info->btree_info, root, 0);
+	return dm_btree_empty(&info->btree_info, root, 5);
 }
 EXPORT_SYMBOL_GPL(dm_array_empty);
 
