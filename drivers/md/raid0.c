@@ -381,6 +381,9 @@ static int raid0_run(struct mddev *mddev)
 		mddev->private = conf;
 	}
 	conf = mddev->private;
+	conf->enable_time_stats = 0;
+	conf->tmp_period_time = 0;
+	conf->total_period_time = 0;
 	if (mddev->queue) {
 		struct md_rdev *rdev;
 		bool discard_supported = true;
@@ -673,13 +676,24 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 {
 	struct strip_zone *zone;
 	struct md_rdev *tmp_dev;
+	struct r0conf *conf;
 	sector_t bio_sector;
 	sector_t sector;
 	unsigned chunk_sects;
 	unsigned sectors;
+	unsigned long var, t;
+	unsigned int hi, lo;
 
 	/* printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][chunksector=%d][blk_name=%s]\n", bio->bi_opf, \
 			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, mddev->chunk_sectors, bio->bi_disk->disk_name); */
+
+	conf = mddev->private;
+	
+	if (conf->enable_time_stats) {
+		asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+		var = ((unsigned long long int) hi << 32) | lo;
+		conf->tmp_period_time = var;
+	}
 
 	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);
@@ -687,6 +701,18 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	}
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD))) {
+		if (bio->bi_iter.bi_ssdno == -1) {
+			switch (bio->bi_iter.bi_ssdno_2) {
+			case -1:
+				conf->enable_time_stats = 1;
+				break;
+			case -2:
+				conf->enable_time_stats = 0;
+				break;
+			default:
+				break;
+			}
+		}
 		raid0_handle_discard(mddev, bio);
 		return true;
 	}
@@ -728,12 +754,28 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	mddev_check_writesame(mddev, bio);
 	mddev_check_write_zeroes(mddev, bio);
 	generic_make_request(bio);
+
+	if (conf->enable_time_stats) {
+		asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+		var = ((unsigned long long int) hi << 32) | lo;
+		t = var - conf->tmp_period_time;
+		conf->total_period_time += t;
+		conf->tmp_period_time = 0;
+		if(bio_op(bio) == REQ_OP_WRITE) {
+			conf->write_period_time += t;
+		} else if(bio_op(bio) == REQ_OP_READ) {
+			conf->reads_period_time += t;
+		}
+	}
+
 	return true;
 }
 
 static void raid0_status(struct seq_file *seq, struct mddev *mddev)
 {
+	struct r0conf *conf = mddev->private;
 	seq_printf(seq, " %dk chunks", mddev->chunk_sectors / 2);
+	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu", conf->total_period_time, conf->write_period_time, conf->reads_period_time);
 	return;
 }
 

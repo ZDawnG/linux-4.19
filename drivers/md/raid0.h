@@ -13,6 +13,11 @@ struct r0conf {
 	struct md_rdev		**devlist; /* lists of rdevs, pointed to
 					    * by strip_zone->dev */
 	int			nr_strip_zones;
+	u64 enable_time_stats;
+	u64 tmp_period_time;
+	u64 total_period_time;
+	u64 write_period_time;
+	u64 reads_period_time;
 };
 
 #endif
