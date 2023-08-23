@@ -655,7 +655,7 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 			conf->strip_zone[0].nb_dev + disk];
 		if (__blkdev_issue_remap(rdev->bdev,
 			dev_start + zone->dev_start + rdev->data_offset,
-			dev_start2 + zone->dev_start + rdev->data_offset,
+			bio->bi_iter.bi_ssdno ? bio->bi_iter.bi_sector_2 : dev_start2 + zone->dev_start + rdev->data_offset,
 			bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2, bio->bi_iter.bi_ssdno_3,
 			dev_end - dev_start, GFP_NOIO, 0, &discard_bio) ||
 		    !discard_bio)
