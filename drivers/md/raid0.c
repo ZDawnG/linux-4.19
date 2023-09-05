@@ -17,6 +17,12 @@
    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include <linux/mm.h>
+#include <linux/mm_types.h>
+#include <asm/string_64.h>
+#include <linux/bio.h>
+#include <linux/gfp.h>
+#include <linux/types.h>
 #include <linux/blkdev.h>
 #include <linux/seq_file.h>
 #include <linux/module.h>
@@ -25,6 +31,8 @@
 #include "md.h"
 #include "raid0.h"
 #include "raid5.h"
+
+static int raid_mode = 5;
 
 #define UNSUPPORTED_MDDEV_FLAGS		\
 	((1L << MD_HAS_JOURNAL) |	\
@@ -79,6 +87,50 @@ static void dump_zones(struct mddev *mddev)
 			(unsigned long long)zone_size>>1);
 		zone_start = conf->strip_zone[j].zone_end;
 	}
+}
+
+/*
+ * Input: a 'big' sector number,
+ * Output: index of the data and parity disk, and the sector # in them.
+ */
+sector_t r5_compute_sector(struct mddev *mddev, struct r0conf *conf, sector_t r_sector, int *dd_idx, int is_pd)
+{
+	sector_t stripe, stripe2;
+	sector_t chunk_number;
+	unsigned int chunk_offset;
+	int pd_idx;
+	sector_t new_sector;
+	int sectors_per_chunk = mddev->chunk_sectors;
+	int raid_disks = conf->strip_zone[0].nb_dev;
+	int data_disks = raid_disks - 1;
+
+	/* First compute the information on this sector */
+
+	/*
+	 * Compute the chunk number and the sector offset inside the chunk
+	 */
+	chunk_offset = sector_div(r_sector, sectors_per_chunk);
+	chunk_number = r_sector;
+
+	/*
+	 * Compute the stripe number
+	 */
+	stripe = chunk_number;
+	*dd_idx = sector_div(stripe, data_disks);
+	stripe2 = stripe;
+	/*
+	 * Select the parity disk based on the user selected algorithm.
+	 */
+	pd_idx = -1;
+	pd_idx = data_disks - sector_div(stripe2, raid_disks);
+	*dd_idx = (pd_idx + 1 + *dd_idx) % raid_disks;
+	if (is_pd)
+		*dd_idx = pd_idx;
+	/*
+	 * Finally, compute the new sector number
+	 */
+	new_sector = (sector_t)stripe * sectors_per_chunk + chunk_offset;
+	return new_sector;
 }
 
 static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
@@ -224,6 +276,7 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 	}
 	zone->nb_dev = cnt;
 	zone->zone_end = smallest->sectors * cnt;
+	conf->max_sector = (smallest->sectors / cnt) * (cnt - 1);
 
 	curr_zone_end = zone->zone_end;
 
@@ -312,14 +365,19 @@ static struct strip_zone *find_zone(struct r0conf *conf,
  * power 2 flow and a general flow for the sake of performance
 */
 static struct md_rdev *map_sector(struct mddev *mddev, struct strip_zone *zone,
-				sector_t sector, sector_t *sector_offset)
+				sector_t sector, sector_t *sector_offset, int is_pd)
 {
 	unsigned int sect_in_chunk;
 	sector_t chunk;
 	struct r0conf *conf = mddev->private;
 	int raid_disks = conf->strip_zone[0].nb_dev;
 	unsigned int chunk_sects = mddev->chunk_sectors;
+	int dd_idx;
 
+	if (raid_mode && sector < conf->max_sector) {
+		*sector_offset = r5_compute_sector(mddev, conf, sector, &dd_idx, is_pd);
+		return conf->devlist[dd_idx];
+	}
 	if (is_power_of_2(chunk_sects)) {
 		int chunksect_bits = ffz(~chunk_sects);
 		/* find the sector offset inside the chunk */
@@ -365,6 +423,10 @@ static int raid0_run(struct mddev *mddev)
 {
 	struct r0conf *conf;
 	int ret;
+	struct workqueue_struct *read_wq;
+	struct workqueue_struct *write_wq;
+	mempool_t *read_work_pool = NULL;
+	mempool_t *write_work_pool = NULL;
 
 	if (mddev->chunk_sectors == 0) {
 		pr_warn("md/raid0:%s: chunk size must be set.\n", mdname(mddev));
@@ -372,6 +434,29 @@ static int raid0_run(struct mddev *mddev)
 	}
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
+
+	read_wq = create_singlethread_workqueue("md-r5r");
+	if (!read_wq) {
+		return -ENOMEM;
+	}
+	read_work_pool = mempool_create_kmalloc_pool(256, sizeof(struct r5_check_work));
+	if (!read_work_pool) {
+		destroy_workqueue(read_wq);
+		return -ENOMEM;
+	}
+	write_wq = create_singlethread_workqueue("md-r5w");
+	if (!write_wq) {
+		destroy_workqueue(read_wq);
+		mempool_destroy(read_work_pool);
+		return -ENOMEM;
+	}
+	write_work_pool = mempool_create_kmalloc_pool(256, sizeof(struct r5_check_work));
+	if (!write_work_pool) {
+		destroy_workqueue(read_wq);
+		mempool_destroy(read_work_pool);
+		destroy_workqueue(write_wq);
+		return -ENOMEM;
+	}
 
 	/* if private is not null, we are here after takeover */
 	if (mddev->private == NULL) {
@@ -384,6 +469,14 @@ static int raid0_run(struct mddev *mddev)
 	conf->enable_time_stats = 0;
 	conf->tmp_period_time = 0;
 	conf->total_period_time = 0;
+	conf->read_workqueue = read_wq;
+	conf->read_work_pool = read_work_pool;
+	conf->write_workqueue = write_wq;
+	conf->write_work_pool = write_work_pool;
+	conf->io_count = 0;
+	conf->page_count = 0;
+	conf->io_count_free = 0;
+	conf->page_count_free = 0;
 	if (mddev->queue) {
 		struct md_rdev *rdev;
 		bool discard_supported = true;
@@ -443,9 +536,226 @@ static void raid0_free(struct mddev *mddev, void *priv)
 {
 	struct r0conf *conf = priv;
 
+	destroy_workqueue(conf->read_workqueue);
+	mempool_destroy(conf->read_work_pool);
+	destroy_workqueue(conf->write_workqueue);
+	mempool_destroy(conf->write_work_pool);
 	kfree(conf->strip_zone);
 	kfree(conf->devlist);
 	kfree(conf);
+}
+
+void page_xor(struct page* dst, struct page* src, size_t size) {
+	unsigned int i;
+	unsigned long* dst_ptr = page_address(dst);
+	unsigned long* src_ptr = page_address(src);
+
+	// Calculate the number of elements (unsigned long) to XOR.
+	size_t num_elements = size / sizeof(unsigned long);
+
+	// Perform the XOR operation.
+	for (i = 0; i < num_elements; i++) {
+		dst_ptr[i] ^= src_ptr[i];
+	}
+}
+
+void r5_valid_write_endio(struct bio *bio) {
+	struct r5_check_io *io;
+
+	io = bio->bi_private;
+	bio_free_pages(bio);
+	bio_put(bio);
+	io->conf->io_count_free += 1;
+	io->conf->page_count_free += 1;
+	kfree(io);
+}
+
+static int r5_valid_write(struct r5_check_io* io) {
+	struct bio *write_bio;
+	write_bio = bio_alloc(GFP_KERNEL, 1);
+	if (!write_bio) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		pr_err("Failed to allocate bio\n");
+		return -ENOMEM;
+	}
+	
+	bio_set_dev(write_bio, io->dev->bdev);
+	if(io->is_remote) {
+		write_bio->bi_opf = REQ_OP_REMOTEWRITE;
+		write_bio->bi_write_hint = io->entry_offset;
+	}
+	else {
+		write_bio->bi_opf = REQ_OP_WRITE;
+	}
+	write_bio->bi_iter.bi_sector = io->sector;
+	write_bio->bi_end_io = r5_valid_write_endio;
+	write_bio->bi_private = io;
+	if (bio_add_page(write_bio, io->page, PAGE_SIZE, 0) <= 0) {
+		bio_put(write_bio);
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		return -ENOSPC;
+	}
+
+	generic_make_request(write_bio);
+	return 0;
+}
+
+static void issue_work_write(struct work_struct *ws) {
+	struct r5_check_work *data = container_of(ws, struct r5_check_work, worker);
+	struct r5_check_io *io = (struct r5_check_io *)data->io;
+
+	mempool_free(data, io->conf->write_work_pool);
+
+	r5_valid_write(io);
+}
+
+void r5_valid_read_endio(struct bio *bio) {
+	struct r5_check_io *io;
+	struct r5_check_work *data;
+
+	io = bio->bi_private;
+	if(io->page && io->bio_page) {
+		page_xor(io->page, io->bio_page, PAGE_SIZE);
+	}
+	bio_free_pages(bio);
+	bio_put(bio);
+	
+	data = mempool_alloc(io->conf->write_work_pool, GFP_NOIO);
+	if (!data) {
+		if(io->page)
+			__free_page(io->page);
+		kfree(io);
+		return;
+	}
+	data->io = io;
+	INIT_WORK(&(data->worker), issue_work_write);
+	queue_work(io->conf->write_workqueue, &(data->worker));
+}
+
+static int r5_valid_read(struct r5_check_io* io) {
+	struct bio *read_bio;
+	struct page *page;
+	read_bio = bio_alloc(GFP_KERNEL, 1);
+	if (!read_bio) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		pr_err("Failed to allocate bio\n");
+		return -ENOMEM;
+	}
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		pr_err("Failed to allocate page\n");
+		bio_put(read_bio);
+		return -ENOMEM;
+	}
+	
+	bio_set_dev(read_bio, io->dev->bdev);
+	if(io->is_remote) {
+		read_bio->bi_opf = REQ_OP_REMOTEREAD;
+		read_bio->bi_write_hint = io->entry_offset;
+	}
+	else {
+		read_bio->bi_opf = REQ_OP_READ;
+	}
+	read_bio->bi_iter.bi_sector = io->sector;
+	read_bio->bi_end_io = r5_valid_read_endio;
+	read_bio->bi_private = io;
+	if (bio_add_page(read_bio, page, PAGE_SIZE, 0) <= 0) {
+		bio_put(read_bio);
+		__free_page(page);
+		if(io->page)
+			__free_page(io->page);
+		kfree(io);
+		return -ENOSPC;
+	}
+	io->bio_page = page;
+	generic_make_request(read_bio);
+	return 0;
+}
+
+static void issue_work_read(struct work_struct *ws) {
+	struct r5_check_work *data = container_of(ws, struct r5_check_work, worker);
+	struct r5_check_io *io = (struct r5_check_io *)data->io;
+
+	mempool_free(data, io->conf->read_work_pool);
+
+	r5_valid_read(io);
+}
+
+void r5_read_old_endio(struct bio *bio) {
+	struct r5_check_io *io;
+	struct r5_check_work *data;
+
+	io = bio->bi_private;
+	if(io->page && io->bio_page) {
+		page_xor(io->page, io->bio_page, PAGE_SIZE);
+	}
+	bio_free_pages(bio);
+	bio_put(bio);
+	
+	data = mempool_alloc(io->conf->read_work_pool, GFP_NOIO);
+	if (!data) {
+		if(io->page)
+			__free_page(io->page);
+		kfree(io);
+		return;
+	}
+	data->io = io;
+	INIT_WORK(&(data->worker), issue_work_read);
+	queue_work(io->conf->read_workqueue, &(data->worker));
+}
+
+static int r5_read_old(sector_t sector, struct block_device * bdev, struct r5_check_io* io) {
+	struct bio *read_bio;
+	struct page *page;
+	read_bio = bio_alloc(GFP_KERNEL, 1);
+	if (!read_bio) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		pr_err("Failed to allocate bio\n");
+		return -ENOMEM;
+	}
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		pr_err("Failed to allocate page\n");
+		bio_put(read_bio);
+		return -ENOMEM;
+	}
+	
+	bio_set_dev(read_bio, bdev);
+	if(io->is_remote) {
+		read_bio->bi_opf = REQ_OP_REMOTEREAD;
+		read_bio->bi_write_hint = io->entry_offset;
+	}
+	else {
+		read_bio->bi_opf = REQ_OP_READ;
+	}
+	read_bio->bi_iter.bi_sector = sector;
+	read_bio->bi_end_io = r5_read_old_endio;
+	read_bio->bi_private = io;
+	if (bio_add_page(read_bio, page, PAGE_SIZE, 0) <= 0) {
+		if(io->page) 
+			__free_page(io->page);
+		kfree(io);
+		bio_put(read_bio);
+		__free_page(page);
+		return -ENOSPC;
+	}
+	io->bio_page = page;
+	generic_make_request(read_bio);
+	return 0;
 }
 
 /*
@@ -514,6 +824,47 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		mddev->chunk_sectors) +
 		last_stripe_index * mddev->chunk_sectors;
 
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && bio->bi_iter.bi_ssdno != -1) {
+		struct page *page;
+		struct md_rdev *tmp_dev, *tmp_dev2;
+		struct r5_check_io *io;
+		sector_t bio_sector = bio->bi_iter.bi_sector;
+		sector_t sector, sector2, s1, s2;
+		page = alloc_page(GFP_KERNEL);
+		if (!page) {
+			pr_err("Failed to allocate page\n");
+			return;
+		}
+		memset(page_address(page), 0, PAGE_SIZE);
+		sector = bio_sector;
+		tmp_dev = map_sector(mddev, zone, sector, &sector, 0); //[local/remote]: oldData's dev
+		s1 = sector + zone->dev_start + tmp_dev->data_offset; //[local/remote]: oldData's sector
+		sector2 = bio_sector;
+		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 1); //[local]: parity's dev
+		s2 = sector2 + zone->dev_start + tmp_dev2->data_offset; //[local]: parity's sector
+		
+		io = kmalloc(sizeof(struct r5_check_io), GFP_NOIO);
+		io->conf = conf;
+		io->page = page;
+		io->is_remote = bio->bi_iter.bi_ssdno;
+		io->entry_offset = bio->bi_iter.bi_ssdno_2;
+		io->sector = s2;
+		if(io->is_remote) {
+			int pd_idx, raid_disk;
+			raid_disk = conf->strip_zone[0].nb_dev;
+			pd_idx = (raid_disk - 1) - (io->entry_offset % raid_disk);
+			io->dev = conf->devlist[pd_idx];
+		}
+		else {
+			io->dev = tmp_dev2;
+		}
+		
+		io->conf->io_count += 1;
+		io->conf->page_count += 1;
+	
+		r5_read_old(s1, tmp_dev->bdev, io);
+	}
+
 	for (disk = 0; disk < zone->nb_dev; disk++) {
 		sector_t dev_start, dev_end;
 		struct bio *discard_bio = NULL;
@@ -573,8 +924,6 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 	sector_t first_stripe_index2, last_stripe_index2;
 	sector_t start_disk_offset2;
 	unsigned int start_disk_index2;
-	sector_t end_disk_offset2;
-	unsigned int end_disk_index2;
 
 	unsigned int disk;
 
@@ -625,9 +974,63 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 		mddev->chunk_sectors) +
 		first_stripe_index2 * mddev->chunk_sectors;
 	
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && bio->bi_iter.bi_ssdno != -1) {
+		struct page *page, *page2;
+		struct bio_vec bv;
+		struct bvec_iter iter;
+		struct md_rdev *tmp_dev, *tmp_dev2, *tmp_dev3;
+		struct r5_check_io *io;
+		sector_t bio_sector = bio->bi_iter.bi_sector;
+		sector_t bio_sector_2 = bio->bi_iter.bi_sector_2;
+		sector_t sector, sector2, sector3, s1, s2, s3;
+		page = alloc_page(GFP_KERNEL);
+		if (!page) {
+			pr_err("Failed to allocate page\n");
+			return;
+		}
+		memset(page_address(page), 0, PAGE_SIZE);
+		bio_for_each_segment(bv, bio, iter) {
+			page2 = bv.bv_page;
+			if(page2)
+				memcpy(page_address(page), page_address(page2), PAGE_SIZE);
+        	break;
+		}
+		sector = bio_sector;
+		tmp_dev = map_sector(mddev, zone, sector, &sector, 0); //[loacal/remote]: newData's dev; [remote]: oldData's dev
+		s1 = sector + zone->dev_start + tmp_dev->data_offset; //[loacal/remote]: newData's sector; [remote]: oldData's sector
+		sector2 = bio_sector_2;
+		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 0); //[local]: oldData's dev
+		s2 = sector2 + zone->dev_start + tmp_dev2->data_offset; //[local]: oldData's sector
+		sector3 = bio_sector_2;
+		tmp_dev3 = map_sector(mddev, zone, sector3, &sector3, 1); //[local]: parity's dev
+		s3 = sector3 + zone->dev_start + tmp_dev3->data_offset; //[local]: parity's sector
+		
+		io = kmalloc(sizeof(struct r5_check_io), GFP_NOIO);
+		io->conf = conf;
+		io->page = page;
+		io->is_remote = bio->bi_iter.bi_ssdno;
+		io->entry_offset = bio->bi_iter.bi_ssdno_2;
+		io->conf->io_count += 1;
+		io->conf->page_count += 1;
+		if(io->is_remote) {
+			int pd_idx, raid_disk;
+			raid_disk = conf->strip_zone[0].nb_dev;
+			pd_idx = (raid_disk - 1) - (io->entry_offset % raid_disk);
+			
+			io->dev = conf->devlist[pd_idx];
+			io->sector = s1;
+			r5_read_old(s1, tmp_dev->bdev, io);
+		}
+		else {
+			io->dev = tmp_dev3;
+			io->sector = s3;
+			r5_read_old(s2, tmp_dev2->bdev, io);
+		}
+	}
+	
 	for (disk = 0; disk < zone->nb_dev; disk++) {
 		sector_t dev_start, dev_end;
-		sector_t dev_start2, dev_end2;
+		sector_t dev_start2;
 		struct bio *discard_bio = NULL;
 		struct md_rdev *rdev;
 
@@ -676,13 +1079,17 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 {
 	struct strip_zone *zone;
 	struct md_rdev *tmp_dev;
+	struct md_rdev *tmp_dev2;
 	struct r0conf *conf;
 	sector_t bio_sector;
 	sector_t sector;
+	sector_t sector2;
 	unsigned chunk_sects;
 	unsigned sectors;
 	unsigned long var, t;
 	unsigned int hi, lo;
+	struct r5_check_io *io;
+	struct page *page, *page2;
 
 	/* printk(KERN_INFO "[op=%d][bi_sector=0x%llx][bi_size=%u][chunksector=%d][blk_name=%s]\n", bio->bi_opf, \
 			(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, mddev->chunk_sectors, bio->bi_disk->disk_name); */
@@ -743,10 +1150,41 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	}
 
 	zone = find_zone(mddev->private, &sector);
-	tmp_dev = map_sector(mddev, zone, sector, &sector);
+	tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
 	bio_set_dev(bio, tmp_dev->bdev);
 	bio->bi_iter.bi_sector = sector + zone->dev_start +
 		tmp_dev->data_offset;
+
+	if(raid_mode && (bio_op(bio) == REQ_OP_WRITE) && (bio_sector < conf->max_sector) && (bio->bi_iter.bi_size != 0)) {
+		struct bio_vec bv;
+		struct bvec_iter iter;
+		page = alloc_page(GFP_KERNEL);
+		if (!page) {
+			pr_err("Failed to allocate page.\n");
+			return -ENOMEM;
+		}
+		bio_for_each_segment(bv, bio, iter) {
+			page2 = bv.bv_page;
+			if(page2)
+				memcpy(page_address(page), page_address(page2), PAGE_SIZE);
+        	break;
+		}
+
+		sector2 = bio_sector;
+		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 1);
+		
+		io = kmalloc(sizeof(struct r5_check_io), GFP_NOIO);
+		io->conf = conf;
+		io->dev = tmp_dev2;
+		io->page = page;
+		io->sector = sector2 + zone->dev_start + tmp_dev2->data_offset;
+		io->is_remote = 0;
+		io->entry_offset = 0;
+		io->conf->io_count++;
+		io->conf->page_count++;
+	
+		r5_read_old(bio->bi_iter.bi_sector, tmp_dev->bdev, io);
+	}
 
 	if (mddev->gendisk)
 		trace_block_bio_remap(bio->bi_disk->queue, bio,
@@ -775,7 +1213,9 @@ static void raid0_status(struct seq_file *seq, struct mddev *mddev)
 {
 	struct r0conf *conf = mddev->private;
 	seq_printf(seq, " %dk chunks", mddev->chunk_sectors / 2);
-	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu", conf->total_period_time, conf->write_period_time, conf->reads_period_time);
+	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu\n", conf->total_period_time, conf->write_period_time, conf->reads_period_time);
+	seq_printf(seq, "io_cnt:%lld, io_cnt_free:%lld;", conf->io_count, conf->io_count_free);
+	seq_printf(seq, "page_cnt:%lld, page_cnt_free:%lld;", conf->page_count, conf->page_count_free);
 	return;
 }
 
@@ -969,6 +1409,7 @@ static void raid0_exit (void)
 
 module_init(raid0_init);
 module_exit(raid0_exit);
+module_param(raid_mode, int, 0644);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RAID0 (striping) personality for MD");
 MODULE_ALIAS("md-personality-2"); /* RAID0 */

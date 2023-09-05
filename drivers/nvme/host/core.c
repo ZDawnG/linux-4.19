@@ -12,6 +12,7 @@
  * more details.
  */
 
+#include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
 #include <linux/delay.h>
@@ -635,7 +636,7 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 			if (WARN_ON_ONCE(!nvme_ns_has_pi(ns)))
 				return BLK_STS_NOTSUPP;
 			control |= NVME_RW_PRINFO_PRACT;
-		} else if (req_op(req) == REQ_OP_WRITE) {
+		} else if (req_op(req) == REQ_OP_WRITE || req_op(req) == REQ_OP_REMOTEWRITE) {
 			t10_pi_prepare(req, ns->pi_type);
 		}
 
@@ -697,11 +698,16 @@ blk_status_t nvme_setup_cmd(struct nvme_ns *ns, struct request *req,
 			cmd->dsm.opcode = nvme_cmd_dedupwrite;
 		break;
 	case REQ_OP_REMOTEREAD:
+	case REQ_OP_REMOTEWRITE:
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
 		ret = nvme_setup_rw(ns, req, cmd);
 		if(req_op(req) == REQ_OP_REMOTEREAD) {
 			cmd->rw.opcode = nvme_cmd_remoteread;
+			cmd->rw.rsvd2 = req->write_hint;
+		}
+		else if(req_op(req) == REQ_OP_REMOTEWRITE) {
+			cmd->rw.opcode = nvme_cmd_remotewrite;
 			cmd->rw.rsvd2 = req->write_hint;
 		}
 		break;

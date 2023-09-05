@@ -295,9 +295,11 @@ enum req_opf {
 	/* write the zero filled sector many times */
 	REQ_OP_WRITE_ZEROES	= 9,
 	/* remap sectors */
-	REQ_OP_DEDUPWRITE		= 10,
+	REQ_OP_DEDUPWRITE	= 11,
+	/* write sectors to the device */
+	REQ_OP_REMOTEWRITE	= 13,
 	/* read sectors from the device */
-	REQ_OP_REMOTEREAD		= 14,
+	REQ_OP_REMOTEREAD	= 14,
 
 	/* SCSI passthrough using struct scsi_request */
 	REQ_OP_SCSI_IN		= 32,
