@@ -16,10 +16,8 @@ struct r0conf {
 	struct md_rdev		**devlist; /* lists of rdevs, pointed to
 					    * by strip_zone->dev */
 	int			nr_strip_zones;
-	struct workqueue_struct *read_workqueue;
-	struct workqueue_struct *write_workqueue;
-	mempool_t *read_work_pool;
-	mempool_t *write_work_pool;
+	struct workqueue_struct *workqueue;
+	mempool_t *work_pool;
 	u64 max_sector;
 	u64 enable_time_stats;
 	u64 tmp_period_time;

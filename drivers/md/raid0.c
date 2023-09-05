@@ -17,6 +17,8 @@
    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include "linux/printk.h"
+#include <linux/stddef.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <asm/string_64.h>
@@ -423,10 +425,8 @@ static int raid0_run(struct mddev *mddev)
 {
 	struct r0conf *conf;
 	int ret;
-	struct workqueue_struct *read_wq;
-	struct workqueue_struct *write_wq;
-	mempool_t *read_work_pool = NULL;
-	mempool_t *write_work_pool = NULL;
+	struct workqueue_struct *wq = NULL;
+	mempool_t *work_pool = NULL;
 
 	if (mddev->chunk_sectors == 0) {
 		pr_warn("md/raid0:%s: chunk size must be set.\n", mdname(mddev));
@@ -435,27 +435,16 @@ static int raid0_run(struct mddev *mddev)
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
 
-	read_wq = create_singlethread_workqueue("md-r5r");
-	if (!read_wq) {
-		return -ENOMEM;
-	}
-	read_work_pool = mempool_create_kmalloc_pool(256, sizeof(struct r5_check_work));
-	if (!read_work_pool) {
-		destroy_workqueue(read_wq);
-		return -ENOMEM;
-	}
-	write_wq = create_singlethread_workqueue("md-r5w");
-	if (!write_wq) {
-		destroy_workqueue(read_wq);
-		mempool_destroy(read_work_pool);
-		return -ENOMEM;
-	}
-	write_work_pool = mempool_create_kmalloc_pool(256, sizeof(struct r5_check_work));
-	if (!write_work_pool) {
-		destroy_workqueue(read_wq);
-		mempool_destroy(read_work_pool);
-		destroy_workqueue(write_wq);
-		return -ENOMEM;
+	if(raid_mode) {
+		wq = create_singlethread_workqueue("md-r5");
+		if (!wq) {
+			return -ENOMEM;
+		}
+		work_pool = mempool_create_kmalloc_pool(256, sizeof(struct r5_check_work));
+		if (!work_pool) {
+			destroy_workqueue(wq);
+			return -ENOMEM;
+		}
 	}
 
 	/* if private is not null, we are here after takeover */
@@ -469,10 +458,11 @@ static int raid0_run(struct mddev *mddev)
 	conf->enable_time_stats = 0;
 	conf->tmp_period_time = 0;
 	conf->total_period_time = 0;
-	conf->read_workqueue = read_wq;
-	conf->read_work_pool = read_work_pool;
-	conf->write_workqueue = write_wq;
-	conf->write_work_pool = write_work_pool;
+	if(raid_mode) {
+		conf->workqueue = wq;
+		conf->work_pool = work_pool;
+		pr_debug("md/raid0:%s: work related done.\n", mdname(mddev));
+	}
 	conf->io_count = 0;
 	conf->page_count = 0;
 	conf->io_count_free = 0;
@@ -536,10 +526,10 @@ static void raid0_free(struct mddev *mddev, void *priv)
 {
 	struct r0conf *conf = priv;
 
-	destroy_workqueue(conf->read_workqueue);
-	mempool_destroy(conf->read_work_pool);
-	destroy_workqueue(conf->write_workqueue);
-	mempool_destroy(conf->write_work_pool);
+	if(conf->workqueue)
+		destroy_workqueue(conf->workqueue);
+	if(conf->work_pool)
+		mempool_destroy(conf->work_pool);
 	kfree(conf->strip_zone);
 	kfree(conf->devlist);
 	kfree(conf);
@@ -608,7 +598,7 @@ static void issue_work_write(struct work_struct *ws) {
 	struct r5_check_work *data = container_of(ws, struct r5_check_work, worker);
 	struct r5_check_io *io = (struct r5_check_io *)data->io;
 
-	mempool_free(data, io->conf->write_work_pool);
+	mempool_free(data, io->conf->work_pool);
 
 	r5_valid_write(io);
 }
@@ -624,7 +614,7 @@ void r5_valid_read_endio(struct bio *bio) {
 	bio_free_pages(bio);
 	bio_put(bio);
 	
-	data = mempool_alloc(io->conf->write_work_pool, GFP_NOIO);
+	data = mempool_alloc(io->conf->work_pool, GFP_NOIO);
 	if (!data) {
 		if(io->page)
 			__free_page(io->page);
@@ -633,7 +623,7 @@ void r5_valid_read_endio(struct bio *bio) {
 	}
 	data->io = io;
 	INIT_WORK(&(data->worker), issue_work_write);
-	queue_work(io->conf->write_workqueue, &(data->worker));
+	queue_work(io->conf->workqueue, &(data->worker));
 }
 
 static int r5_valid_read(struct r5_check_io* io) {
@@ -685,7 +675,7 @@ static void issue_work_read(struct work_struct *ws) {
 	struct r5_check_work *data = container_of(ws, struct r5_check_work, worker);
 	struct r5_check_io *io = (struct r5_check_io *)data->io;
 
-	mempool_free(data, io->conf->read_work_pool);
+	mempool_free(data, io->conf->work_pool);
 
 	r5_valid_read(io);
 }
@@ -701,7 +691,7 @@ void r5_read_old_endio(struct bio *bio) {
 	bio_free_pages(bio);
 	bio_put(bio);
 	
-	data = mempool_alloc(io->conf->read_work_pool, GFP_NOIO);
+	data = mempool_alloc(io->conf->work_pool, GFP_NOIO);
 	if (!data) {
 		if(io->page)
 			__free_page(io->page);
@@ -710,7 +700,7 @@ void r5_read_old_endio(struct bio *bio) {
 	}
 	data->io = io;
 	INIT_WORK(&(data->worker), issue_work_read);
-	queue_work(io->conf->read_workqueue, &(data->worker));
+	queue_work(io->conf->workqueue, &(data->worker));
 }
 
 static int r5_read_old(sector_t sector, struct block_device * bdev, struct r5_check_io* io) {
@@ -858,11 +848,36 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		else {
 			io->dev = tmp_dev2;
 		}
-		
 		io->conf->io_count += 1;
 		io->conf->page_count += 1;
 	
 		r5_read_old(s1, tmp_dev->bdev, io);
+	}
+
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector) {
+		struct bio *discard_bio = NULL;
+		struct md_rdev *tmp_dev;
+		sector_t sector, s1;
+		sector_t bio_sector = bio->bi_iter.bi_sector;
+		
+		sector = bio_sector;
+		tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
+		s1 = sector + zone->dev_start + tmp_dev->data_offset;
+		if (__blkdev_issue_discard(tmp_dev->bdev,s1,8, GFP_NOIO, 
+			0, &discard_bio, bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2) || !discard_bio) 
+		{
+			bio_endio(bio);
+			return;
+		}
+		bio_chain(discard_bio, bio);
+		bio_clone_blkcg_association(discard_bio, bio);
+		if (mddev->gendisk)
+			trace_block_bio_remap(bdev_get_queue(tmp_dev->bdev),
+				discard_bio, disk_devt(mddev->gendisk),
+				bio->bi_iter.bi_sector);
+		generic_make_request(discard_bio);
+		bio_endio(bio);
+		return;
 	}
 
 	for (disk = 0; disk < zone->nb_dev; disk++) {
@@ -1028,6 +1043,37 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 		}
 	}
 	
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector) {
+		struct bio *discard_bio = NULL;
+		struct md_rdev *tmp_dev, *tmp_dev2;
+		sector_t sector, sector2, s1, s2;
+		sector_t bio_sector = bio->bi_iter.bi_sector;
+		
+		sector = bio_sector;
+		tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
+		s1 = sector + zone->dev_start + tmp_dev->data_offset;
+		sector2 = bio_sector;
+		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 0);
+		s2 = sector2 + zone->dev_start + tmp_dev->data_offset;
+		
+		if (__blkdev_issue_remap(tmp_dev->bdev, s1, bio->bi_iter.bi_ssdno ? bio->bi_iter.bi_sector_2 : s2,
+			bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2, bio->bi_iter.bi_ssdno_3,
+			8, GFP_NOIO, 0, &discard_bio) || !discard_bio) 
+		{
+			bio_endio(bio);
+			return;
+		}
+		bio_chain(discard_bio, bio);
+		bio_clone_blkcg_association(discard_bio, bio);
+		if (mddev->gendisk)
+			trace_block_bio_remap(bdev_get_queue(tmp_dev->bdev),
+				discard_bio, disk_devt(mddev->gendisk),
+				bio->bi_iter.bi_sector);
+		generic_make_request(discard_bio);
+		bio_endio(bio);
+		return;
+	}
+
 	for (disk = 0; disk < zone->nb_dev; disk++) {
 		sector_t dev_start, dev_end;
 		sector_t dev_start2;
