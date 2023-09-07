@@ -2,6 +2,8 @@
 #ifndef _RAID0_H
 #define _RAID0_H
 
+#include <linux/kernel.h>
+#include <linux/types.h>
 #include <linux/workqueue.h>
 #include <linux/mempool.h>
 
@@ -28,6 +30,13 @@ struct r0conf {
 	long long int page_count;
 	long long int io_count_free;
 	long long int page_count_free;
+	sector_t data_start;
+	atomic_t user_reads;
+	atomic_t user_write;
+	atomic_t meta_reads;
+	atomic_t meta_write;
+	atomic_t remote_parity_used;
+	atomic_t *remote_parity;
 };
 
 struct r5_check_io {

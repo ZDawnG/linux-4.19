@@ -17,6 +17,7 @@
    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include <linux/atomic.h>
 #include "linux/printk.h"
 #include <linux/stddef.h>
 #include <linux/mm.h>
@@ -467,6 +468,12 @@ static int raid0_run(struct mddev *mddev)
 	conf->page_count = 0;
 	conf->io_count_free = 0;
 	conf->page_count_free = 0;
+	conf->remote_parity = NULL;
+	atomic_set(&(conf->user_reads), 0);
+	atomic_set(&(conf->user_write), 0);
+	atomic_set(&(conf->meta_reads), 0);
+	atomic_set(&(conf->meta_write), 0);
+	atomic_set(&(conf->remote_parity_used), 0);
 	if (mddev->queue) {
 		struct md_rdev *rdev;
 		bool discard_supported = true;
@@ -530,6 +537,9 @@ static void raid0_free(struct mddev *mddev, void *priv)
 		destroy_workqueue(conf->workqueue);
 	if(conf->work_pool)
 		mempool_destroy(conf->work_pool);
+	if(conf->remote_parity) {
+		vfree(conf->remote_parity);
+	}
 	kfree(conf->strip_zone);
 	kfree(conf->devlist);
 	kfree(conf);
@@ -814,7 +824,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		mddev->chunk_sectors) +
 		last_stripe_index * mddev->chunk_sectors;
 
-	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && bio->bi_iter.bi_ssdno != -1) {
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && (bio->bi_iter.bi_ssdno != -1 && bio->bi_iter.bi_ssdno != -2)) {
 		struct page *page;
 		struct md_rdev *tmp_dev, *tmp_dev2;
 		struct r5_check_io *io;
@@ -832,7 +842,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		sector2 = bio_sector;
 		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 1); //[local]: parity's dev
 		s2 = sector2 + zone->dev_start + tmp_dev2->data_offset; //[local]: parity's sector
-		
+
 		io = kmalloc(sizeof(struct r5_check_io), GFP_NOIO);
 		io->conf = conf;
 		io->page = page;
@@ -854,6 +864,30 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		r5_read_old(s1, tmp_dev->bdev, io);
 	}
 
+	if((bio->bi_iter.bi_ssdno == -1 || bio->bi_iter.bi_ssdno == -2) && bio->bi_iter.bi_ssdno_2 != -1 && bio->bi_iter.bi_ssdno_2 != -2) {
+		int i;
+		atomic_t *t;
+		sector_t sector, s1;
+		struct md_rdev *tmp_dev;
+		sector_t bio_sector = bio->bi_iter.bi_sector;
+		u64 size = bio->bi_iter.bi_ssdno_2 * sizeof(atomic_t);
+		
+		sector = bio_sector;
+		tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
+		s1 = sector + zone->dev_start + tmp_dev->data_offset;
+		if(conf->data_start == 0) {
+			conf->data_start = s1;
+		}
+		if(conf->remote_parity == NULL && bio->bi_iter.bi_ssdno_2) {
+			conf->remote_parity = vmalloc(size);
+			t = conf->remote_parity;
+			for (i = 0; i < bio->bi_iter.bi_ssdno_2; ++i, ++t) {
+				atomic_set(t, 0);
+			}
+		}
+		pr_debug("md/raid0:%s: sector:%lu map to %lu\n", mdname(mddev), bio_sector, s1);
+	}
+
 	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector) {
 		struct bio *discard_bio = NULL;
 		struct md_rdev *tmp_dev;
@@ -863,6 +897,13 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		sector = bio_sector;
 		tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
 		s1 = sector + zone->dev_start + tmp_dev->data_offset;
+		
+		if(bio->bi_iter.bi_ssdno == 1 && conf->remote_parity) {
+			u64 offset = bio->bi_iter.bi_ssdno_2;
+			atomic_t *t = conf->remote_parity + offset;
+			if(atomic_dec_and_test(t))
+				atomic_dec(&(conf->remote_parity_used));
+		}
 		if (__blkdev_issue_discard(tmp_dev->bdev,s1,8, GFP_NOIO, 
 			0, &discard_bio, bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2) || !discard_bio) 
 		{
@@ -989,10 +1030,8 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 		mddev->chunk_sectors) +
 		first_stripe_index2 * mddev->chunk_sectors;
 	
-	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && bio->bi_iter.bi_ssdno != -1) {
-		struct page *page, *page2;
-		struct bio_vec bv;
-		struct bvec_iter iter;
+	if(raid_mode && bio->bi_iter.bi_sector < conf->max_sector && (bio->bi_iter.bi_ssdno != -1 && bio->bi_iter.bi_ssdno != -2)) {
+		struct page *page;
 		struct md_rdev *tmp_dev, *tmp_dev2, *tmp_dev3;
 		struct r5_check_io *io;
 		sector_t bio_sector = bio->bi_iter.bi_sector;
@@ -1004,12 +1043,6 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 			return;
 		}
 		memset(page_address(page), 0, PAGE_SIZE);
-		bio_for_each_segment(bv, bio, iter) {
-			page2 = bv.bv_page;
-			if(page2)
-				memcpy(page_address(page), page_address(page2), PAGE_SIZE);
-        	break;
-		}
 		sector = bio_sector;
 		tmp_dev = map_sector(mddev, zone, sector, &sector, 0); //[loacal/remote]: newData's dev; [remote]: oldData's dev
 		s1 = sector + zone->dev_start + tmp_dev->data_offset; //[loacal/remote]: newData's sector; [remote]: oldData's sector
@@ -1048,14 +1081,22 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 		struct md_rdev *tmp_dev, *tmp_dev2;
 		sector_t sector, sector2, s1, s2;
 		sector_t bio_sector = bio->bi_iter.bi_sector;
+		sector_t bio_sector2 = bio->bi_iter.bi_sector_2;
 		
 		sector = bio_sector;
 		tmp_dev = map_sector(mddev, zone, sector, &sector, 0);
 		s1 = sector + zone->dev_start + tmp_dev->data_offset;
-		sector2 = bio_sector;
+		sector2 = bio_sector2;
 		tmp_dev2 = map_sector(mddev, zone, sector2, &sector2, 0);
 		s2 = sector2 + zone->dev_start + tmp_dev->data_offset;
 		
+		if(bio->bi_iter.bi_ssdno == 1 && conf->remote_parity) {
+			u64 offset = bio->bi_iter.bi_ssdno_2;
+			atomic_t *t = conf->remote_parity + offset;
+			if(atomic_read(t) == 0)
+				atomic_inc(&(conf->remote_parity_used));
+			atomic_inc(t);
+		}
 		if (__blkdev_issue_remap(tmp_dev->bdev, s1, bio->bi_iter.bi_ssdno ? bio->bi_iter.bi_sector_2 : s2,
 			bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2, bio->bi_iter.bi_ssdno_3,
 			8, GFP_NOIO, 0, &discard_bio) || !discard_bio) 
@@ -1154,10 +1195,15 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	}
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD))) {
-		if (bio->bi_iter.bi_ssdno == -1) {
+		if (bio->bi_iter.bi_ssdno == -1 || bio->bi_iter.bi_ssdno == -2) {
 			switch (bio->bi_iter.bi_ssdno_2) {
 			case -1:
 				conf->enable_time_stats = 1;
+				atomic_set(&(conf->user_reads), 0);
+				atomic_set(&(conf->user_write), 0);
+				atomic_set(&(conf->meta_reads), 0);
+				atomic_set(&(conf->meta_write), 0);
+				atomic_set(&(conf->remote_parity_used), 0);
 				break;
 			case -2:
 				conf->enable_time_stats = 0;
@@ -1201,6 +1247,19 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	bio->bi_iter.bi_sector = sector + zone->dev_start +
 		tmp_dev->data_offset;
 
+	if(bio_op(bio) == REQ_OP_WRITE) {
+		if(bio->bi_iter.bi_sector < conf->data_start)
+			atomic_inc(&(conf->meta_write));
+		else
+		 	atomic_inc(&(conf->user_write));
+	}
+	else if(bio_op(bio) == REQ_OP_READ) {
+		if(bio->bi_iter.bi_sector < conf->data_start)
+			atomic_inc(&(conf->meta_reads));
+		else
+		 	atomic_inc(&(conf->user_reads));
+	}
+	
 	if(raid_mode && (bio_op(bio) == REQ_OP_WRITE) && (bio_sector < conf->max_sector) && (bio->bi_iter.bi_size != 0)) {
 		struct bio_vec bv;
 		struct bvec_iter iter;
@@ -1259,9 +1318,13 @@ static void raid0_status(struct seq_file *seq, struct mddev *mddev)
 {
 	struct r0conf *conf = mddev->private;
 	seq_printf(seq, " %dk chunks", mddev->chunk_sectors / 2);
-	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu\n", conf->total_period_time, conf->write_period_time, conf->reads_period_time);
+	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu\n", \
+		conf->total_period_time, conf->write_period_time, conf->reads_period_time);
 	seq_printf(seq, "io_cnt:%lld, io_cnt_free:%lld;", conf->io_count, conf->io_count_free);
-	seq_printf(seq, "page_cnt:%lld, page_cnt_free:%lld;", conf->page_count, conf->page_count_free);
+	seq_printf(seq, "page_cnt:%lld, page_cnt_free:%lld,", conf->page_count, conf->page_count_free);
+	seq_printf(seq, "user_reads:%d, user_writes:%d,meta_reads:%d, meta_writes:%d, remote_parity_used: %d", \
+		atomic_read(&(conf->user_reads)), atomic_read(&(conf->user_write)), \
+		atomic_read(&(conf->meta_reads)), atomic_read(&(conf->meta_write)), atomic_read(&(conf->remote_parity_used)));
 	return;
 }
 
