@@ -559,4 +559,19 @@ config DM_ZONED
 
 	  If unsure, say N.
 
+config DM_DEDUP
+	tristate "Device Mapper Deduplication Support"
+	depends on BLK_DEV_DM
+	select DM_PERSISTENT_DATA
+	select CRYPTO
+	---help---
+	  This device-mapper target provides transparent inline data
+	  deduplication of block devices. Every write coming to a dm-dedup
+	  instance is deduplicated against previously written data.
+
+	  To compile this code as a module, choose M here: the module will
+	  be called dm-dedup.
+
+	  If unsure, say N.
+
 endif # MD
