@@ -704,11 +704,11 @@ blk_status_t nvme_setup_cmd(struct nvme_ns *ns, struct request *req,
 		ret = nvme_setup_rw(ns, req, cmd);
 		if(req_op(req) == REQ_OP_REMOTEREAD) {
 			cmd->rw.opcode = nvme_cmd_remoteread;
-			cmd->rw.rsvd2 = req->write_hint;
+			cmd->rw.rsvd2 = req->read_hint;
 		}
 		else if(req_op(req) == REQ_OP_REMOTEWRITE) {
 			cmd->rw.opcode = nvme_cmd_remotewrite;
-			cmd->rw.rsvd2 = req->write_hint;
+			cmd->rw.rsvd2 = req->read_hint;
 		}
 		break;
 	default:

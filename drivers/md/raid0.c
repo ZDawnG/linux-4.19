@@ -584,7 +584,7 @@ static int r5_valid_write(struct r5_check_io* io) {
 	bio_set_dev(write_bio, io->dev->bdev);
 	if(io->is_remote) {
 		write_bio->bi_opf = REQ_OP_REMOTEWRITE;
-		write_bio->bi_write_hint = io->entry_offset;
+		write_bio->bi_read_hint = io->entry_offset;
 	}
 	else {
 		write_bio->bi_opf = REQ_OP_WRITE;
@@ -660,7 +660,7 @@ static int r5_valid_read(struct r5_check_io* io) {
 	bio_set_dev(read_bio, io->dev->bdev);
 	if(io->is_remote) {
 		read_bio->bi_opf = REQ_OP_REMOTEREAD;
-		read_bio->bi_write_hint = io->entry_offset;
+		read_bio->bi_read_hint = io->entry_offset;
 	}
 	else {
 		read_bio->bi_opf = REQ_OP_READ;
@@ -737,7 +737,7 @@ static int r5_read_old(sector_t sector, struct block_device * bdev, struct r5_ch
 	bio_set_dev(read_bio, bdev);
 	if(io->is_remote) {
 		read_bio->bi_opf = REQ_OP_REMOTEREAD;
-		read_bio->bi_write_hint = io->entry_offset;
+		read_bio->bi_read_hint = io->entry_offset;
 	}
 	else {
 		read_bio->bi_opf = REQ_OP_READ;

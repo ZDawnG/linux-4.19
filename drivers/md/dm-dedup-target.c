@@ -337,7 +337,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 		/* entry found in the LBN->tv store and is a remoteread*/
 		lbn = remap_tarSSD(lbn, t, tv.ver);
 		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
-		clone->bi_write_hint = calculate_entry_offset(dc, lbn);
+		clone->bi_read_hint = calculate_entry_offset(dc, lbn);
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
 		do_io(dc, clone, lbn);
 	} else {

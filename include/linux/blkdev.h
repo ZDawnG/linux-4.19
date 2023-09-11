@@ -234,6 +234,7 @@ struct request {
 	unsigned short nr_integrity_segments;
 #endif
 
+	unsigned int   read_hint;
 	unsigned short write_hint;
 	unsigned short ioprio;
 
