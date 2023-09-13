@@ -279,7 +279,7 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 	}
 	zone->nb_dev = cnt;
 	zone->zone_end = smallest->sectors * cnt;
-	conf->max_sector = (smallest->sectors / cnt) * (cnt - 1);
+	conf->max_sector = (smallest->sectors) * (cnt - 1);
 
 	curr_zone_end = zone->zone_end;
 
