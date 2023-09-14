@@ -7,6 +7,21 @@
 #include <linux/workqueue.h>
 #include <linux/mempool.h>
 
+enum {
+	RAID_WRITE = 0,
+	RAID_REMAP,
+	RAID_DISCARD,
+	RAID_IO_WRITE,
+	RAID_IO_REMAP,
+	RAID_IO_DISCARD,
+	RAID_NUM
+};
+
+enum {
+	PERIOD_START = 0,
+	PERIOD_END
+};
+
 struct strip_zone {
 	sector_t zone_end;	/* Start of the next zone (in sectors) */
 	sector_t dev_start;	/* Zone offset in real dev (in sectors) */
@@ -22,10 +37,8 @@ struct r0conf {
 	mempool_t *work_pool;
 	u64 max_sector;
 	u64 enable_time_stats;
-	u64 tmp_period_time;
-	u64 total_period_time;
-	u64 write_period_time;
-	u64 reads_period_time;
+	u64 tmp_period_time[RAID_NUM];
+	u64 total_period_time[RAID_NUM];
 	long long int io_count;
 	long long int page_count;
 	long long int io_count_free;

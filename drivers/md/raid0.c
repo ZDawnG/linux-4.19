@@ -37,6 +37,33 @@
 
 static int raid_mode = 5;
 
+static void calc_tsc(struct r0conf *conf, int period, int type) {
+    unsigned long var, t;
+    unsigned int hi, lo;
+
+	asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+    var = ((unsigned long long int) hi << 32) | lo;
+	if(!conf->enable_time_stats)
+		return;
+	switch (type)
+	{
+	case PERIOD_START:
+		conf->tmp_period_time[period] = var;
+		break;
+	case PERIOD_END:
+		if(conf->tmp_period_time[period]) {
+			t = var - conf->tmp_period_time[period];
+			conf->total_period_time[period] += t;
+		}
+		conf->tmp_period_time[period] = 0;
+		break;
+	default:
+		break;
+	}
+	
+    return;
+}
+
 #define UNSUPPORTED_MDDEV_FLAGS		\
 	((1L << MD_HAS_JOURNAL) |	\
 	 (1L << MD_JOURNAL_CLEAN) |	\
@@ -426,6 +453,7 @@ static int raid0_run(struct mddev *mddev)
 {
 	struct r0conf *conf;
 	int ret;
+	int i;
 	struct workqueue_struct *wq = NULL;
 	mempool_t *work_pool = NULL;
 
@@ -457,8 +485,10 @@ static int raid0_run(struct mddev *mddev)
 	}
 	conf = mddev->private;
 	conf->enable_time_stats = 0;
-	conf->tmp_period_time = 0;
-	conf->total_period_time = 0;
+	for(i = 0; i < RAID_NUM; ++i) {
+		conf->tmp_period_time[i] = 0;
+		conf->total_period_time[i] = 0;
+	}
 	if(raid_mode) {
 		conf->workqueue = wq;
 		conf->work_pool = work_pool;
@@ -861,7 +891,9 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 		io->conf->io_count += 1;
 		io->conf->page_count += 1;
 	
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_START);
 		r5_read_old(s1, tmp_dev->bdev, io);
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_END);
 	}
 
 	if((bio->bi_iter.bi_ssdno == -1 || bio->bi_iter.bi_ssdno == -2) && bio->bi_iter.bi_ssdno_2 != -1 && bio->bi_iter.bi_ssdno_2 != -2) {
@@ -904,6 +936,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 			if(atomic_dec_and_test(t))
 				atomic_dec(&(conf->remote_parity_used));
 		}
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_START);
 		if (__blkdev_issue_discard(tmp_dev->bdev,s1,8, GFP_NOIO, 
 			0, &discard_bio, bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2) || !discard_bio) 
 		{
@@ -918,6 +951,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 				bio->bi_iter.bi_sector);
 		generic_make_request(discard_bio);
 		bio_endio(bio);
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_END);
 		return;
 	}
 
@@ -946,6 +980,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 
 		rdev = conf->devlist[(zone - conf->strip_zone) *
 			conf->strip_zone[0].nb_dev + disk];
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_START);
 		if (__blkdev_issue_discard(rdev->bdev,
 			dev_start + zone->dev_start + rdev->data_offset,
 			dev_end - dev_start, GFP_NOIO, 0, &discard_bio, bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2) ||
@@ -958,6 +993,7 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 				discard_bio, disk_devt(mddev->gendisk),
 				bio->bi_iter.bi_sector);
 		generic_make_request(discard_bio);
+		calc_tsc(conf, RAID_IO_DISCARD, PERIOD_END);
 	}
 	bio_endio(bio);
 }
@@ -1067,12 +1103,16 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 			
 			io->dev = conf->devlist[pd_idx];
 			io->sector = s1;
+			calc_tsc(conf, RAID_IO_REMAP, PERIOD_START);
 			r5_read_old(s1, tmp_dev->bdev, io);
+			calc_tsc(conf, RAID_IO_REMAP, PERIOD_END);
 		}
 		else {
 			io->dev = tmp_dev3;
 			io->sector = s3;
+			calc_tsc(conf, RAID_IO_REMAP, PERIOD_START);
 			r5_read_old(s2, tmp_dev2->bdev, io);
+			calc_tsc(conf, RAID_IO_REMAP, PERIOD_END);
 		}
 	}
 	
@@ -1097,6 +1137,7 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 				atomic_inc(&(conf->remote_parity_used));
 			atomic_inc(t);
 		}
+		calc_tsc(conf, RAID_IO_REMAP, PERIOD_START);
 		if (__blkdev_issue_remap(tmp_dev->bdev, s1, bio->bi_iter.bi_ssdno ? bio->bi_iter.bi_sector_2 : s2,
 			bio->bi_iter.bi_ssdno, bio->bi_iter.bi_ssdno_2, bio->bi_iter.bi_ssdno_3,
 			8, GFP_NOIO, 0, &discard_bio) || !discard_bio) 
@@ -1112,6 +1153,7 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 				bio->bi_iter.bi_sector);
 		generic_make_request(discard_bio);
 		bio_endio(bio);
+		calc_tsc(conf, RAID_IO_REMAP, PERIOD_END);
 		return;
 	}
 
@@ -1143,6 +1185,7 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 
 		rdev = conf->devlist[(zone - conf->strip_zone) *
 			conf->strip_zone[0].nb_dev + disk];
+		calc_tsc(conf, RAID_IO_REMAP, PERIOD_START);
 		if (__blkdev_issue_remap(rdev->bdev,
 			dev_start + zone->dev_start + rdev->data_offset,
 			bio->bi_iter.bi_ssdno ? bio->bi_iter.bi_sector_2 : dev_start2 + zone->dev_start + rdev->data_offset,
@@ -1157,6 +1200,7 @@ static void raid0_handle_remap(struct mddev *mddev, struct bio *bio)
 				discard_bio, disk_devt(mddev->gendisk),
 				bio->bi_iter.bi_sector);
 		generic_make_request(discard_bio);
+		calc_tsc(conf, RAID_IO_REMAP, PERIOD_END);
 	}
 	bio_endio(bio);
 }
@@ -1173,8 +1217,6 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	sector_t sector2;
 	unsigned chunk_sects;
 	unsigned sectors;
-	unsigned long var, t;
-	unsigned int hi, lo;
 	struct r5_check_io *io;
 	struct page *page, *page2;
 
@@ -1183,11 +1225,8 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 
 	conf = mddev->private;
 	
-	if (conf->enable_time_stats) {
-		asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
-		var = ((unsigned long long int) hi << 32) | lo;
-		conf->tmp_period_time = var;
-	}
+	if(bio_op(bio) == REQ_OP_WRITE)
+		calc_tsc(conf, RAID_WRITE, PERIOD_START);
 
 	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);
@@ -1195,10 +1234,16 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 	}
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD))) {
+		calc_tsc(conf, RAID_DISCARD, PERIOD_START);
 		if (bio->bi_iter.bi_ssdno == -1 || bio->bi_iter.bi_ssdno == -2) {
+			int i;
 			switch (bio->bi_iter.bi_ssdno_2) {
 			case -1:
 				conf->enable_time_stats = 1;
+				for(i = 0; i < RAID_NUM; ++i) {
+					conf->tmp_period_time[i] = 0;
+					conf->total_period_time[i] = 0;
+				}
 				atomic_set(&(conf->user_reads), 0);
 				atomic_set(&(conf->user_write), 0);
 				atomic_set(&(conf->meta_reads), 0);
@@ -1213,11 +1258,14 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 			}
 		}
 		raid0_handle_discard(mddev, bio);
+		calc_tsc(conf, RAID_DISCARD, PERIOD_END);
 		return true;
 	}
 
 	if (unlikely((bio_op(bio) == REQ_OP_DEDUPWRITE))) {
+		calc_tsc(conf, RAID_REMAP, PERIOD_START);
 		raid0_handle_remap(mddev, bio);
+		calc_tsc(conf, RAID_REMAP, PERIOD_END);
 		return true;
 	}
 
@@ -1288,28 +1336,24 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 		io->conf->io_count++;
 		io->conf->page_count++;
 	
+		calc_tsc(conf, RAID_IO_WRITE, PERIOD_START);
 		r5_read_old(bio->bi_iter.bi_sector, tmp_dev->bdev, io);
+		calc_tsc(conf, RAID_IO_WRITE, PERIOD_END);
 	}
 
+	if(bio_op(bio) == REQ_OP_WRITE)
+		calc_tsc(conf, RAID_IO_WRITE, PERIOD_START);
 	if (mddev->gendisk)
 		trace_block_bio_remap(bio->bi_disk->queue, bio,
 				disk_devt(mddev->gendisk), bio_sector);
 	mddev_check_writesame(mddev, bio);
 	mddev_check_write_zeroes(mddev, bio);
 	generic_make_request(bio);
+	if(bio_op(bio) == REQ_OP_WRITE)
+		calc_tsc(conf, RAID_IO_WRITE, PERIOD_END);
 
-	if (conf->enable_time_stats) {
-		asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
-		var = ((unsigned long long int) hi << 32) | lo;
-		t = var - conf->tmp_period_time;
-		conf->total_period_time += t;
-		conf->tmp_period_time = 0;
-		if(bio_op(bio) == REQ_OP_WRITE) {
-			conf->write_period_time += t;
-		} else if(bio_op(bio) == REQ_OP_READ) {
-			conf->reads_period_time += t;
-		}
-	}
+	if(bio_op(bio) == REQ_OP_WRITE)
+		calc_tsc(conf, RAID_WRITE, PERIOD_END);
 
 	return true;
 }
@@ -1317,9 +1361,11 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 static void raid0_status(struct seq_file *seq, struct mddev *mddev)
 {
 	struct r0conf *conf = mddev->private;
+	u64 total = conf->total_period_time[RAID_WRITE] + conf->total_period_time[RAID_REMAP] + conf->total_period_time[RAID_DISCARD];
+	u64 total_io = conf->total_period_time[RAID_IO_WRITE] + conf->total_period_time[RAID_IO_REMAP] + conf->total_period_time[RAID_IO_DISCARD];
+	u64 process = total - total_io;
 	seq_printf(seq, " %dk chunks", mddev->chunk_sectors / 2);
-	seq_printf(seq, "\ntotal cycles: %llu, write cycles: %llu, read cycles: %llu\n", \
-		conf->total_period_time, conf->write_period_time, conf->reads_period_time);
+	seq_printf(seq, "\ntotal cycles: %llu, process cycles: %llu, io cycles: %llu\n", total, process, total_io);
 	seq_printf(seq, "io_cnt:%lld, io_cnt_free:%lld;", conf->io_count, conf->io_count_free);
 	seq_printf(seq, "page_cnt:%lld, page_cnt_free:%lld,", conf->page_count, conf->page_count_free);
 	seq_printf(seq, "user_reads:%d, user_writes:%d,meta_reads:%d, meta_writes:%d, remote_parity_used: %d", \

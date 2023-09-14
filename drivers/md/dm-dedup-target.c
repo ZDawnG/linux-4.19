@@ -124,6 +124,8 @@ struct dm_bufio_client {
 	unsigned long long cntbio_write;
 	unsigned long long cntbio_sort[6];
 	unsigned long long cntbio_sort_r[6];
+	unsigned long long tmp_io_time;
+	unsigned long long total_io_time;
 	int rw;
 	struct list_head client_list;
 	struct shrinker shrinker;
@@ -256,13 +258,15 @@ static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn) {
 	return offset;
 }
 
-static sector_t remap_tarSSD(u64 lpn, int origin, int target) {
+static sector_t remap_tarSSD(struct dedup_config *dc, u64 lpn, int origin, int target) {
+	calc_tsc(dc, PERIOD_MAP, PERIOD_START);
 	if(origin <= target) {
 		lpn += (target - origin);
 	}
 	else {
 		lpn -= (origin - target);
 	}
+	calc_tsc(dc, PERIOD_MAP, PERIOD_END);
 	return lpn;
 }
 
@@ -335,7 +339,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 		bio_zero_endio(bio);
 	} else if (tv.type == 1 && t != tv.ver) {
 		/* entry found in the LBN->tv store and is a remoteread*/
-		lbn = remap_tarSSD(lbn, t, tv.ver);
+		lbn = remap_tarSSD(dc, lbn, t, tv.ver);
 		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
 		clone->bi_read_hint = calculate_entry_offset(dc, lbn);
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
@@ -663,7 +667,7 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	
 	if(tv.type == 1){
 		if(t != tv.ver) { // used mapped to another device
-			lbn2 = remap_tarSSD(lbn, t, tv.ver);
+			lbn2 = remap_tarSSD(dc, lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
             queue_push(dc, 0, lbn2, t, 0);
 			calc_tsc(dc, PERIOD_IO, PERIOD_END);
@@ -973,7 +977,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		}
 		else {	// the lbn writed an duplicate data
 			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
-				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
+				lbn2 = remap_tarSSD(dc, lbn, tmp, lbn_tv.ver);
                 queue_push(dc, 0, lbn2, tmp, 0);
 			}
             queue_push(dc, pbn_this, lbn, lbn_tv.ver, 1);
@@ -2098,6 +2102,9 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_total_block_count = dc->pblocks;
 		data_free_block_count = data_total_block_count - data_used_block_count;	
 		dc->total_period_time[PERIOD_OTHER] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH];
+		dc->total_period_time[PERIOD_MIO] = c->total_io_time;
+		dc->total_period_time[PERIOD_META] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH] - \
+				dc->total_period_time[PERIOD_MIO] - dc->total_period_time[PERIOD_MAP] - dc->total_period_time[PERIOD_IO] ;
 
 		DMEMIT("usr_total_cnt:%llu,usr_write_cnt:%llu,usr_reads_cnt:%llu,", dc->usr_total_cnt, dc->usr_write_cnt, dc->usr_reads_cnt);
 		DMEMIT("meta_io_cnt:%llu,fp_io_cnt:%llu,mapping_io_cnt:%llu,refcount_io_cnt:%llu,others_io_cnt:%llu,persist_io_cnt:%llu,",
@@ -2106,15 +2113,18 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 				c->cntbio_write, c->cntbio_sort[2], c->cntbio_sort[1], c->cntbio_sort[3] + c->cntbio_sort[4], c->cntbio_sort[0], c->cntbio_sort[5]);
 		DMEMIT("read_meta_io_cnt:%llu,read_fp_io_cnt:%llu,read_mapping_io_cnt:%llu,read_refcount_io_cnt:%llu,read_others_io_cnt:%llu,read_persist_io_cnt:%llu,",
 				c->cntbio_read, c->cntbio_sort_r[2], c->cntbio_sort_r[1], c->cntbio_sort_r[3] + c->cntbio_sort_r[4], c->cntbio_sort_r[0], c->cntbio_sort_r[5]);
-		DMEMIT("time_total:%llu, time_read:%llu, time_write:%llu, time_hash:%llu, time_other:%llu, time_fp:%llu, time_l2p:%llu, time_ref:%llu, time_fua:%llu, time_io:%llu, time_gc:%llu,",
-				dc->total_period_time[PERIOD_TOTAL], dc->total_period_time[PERIOD_READ], dc->total_period_time[PERIOD_WRITE],
+		DMEMIT("time_total:%llu, time_read:%llu, time_write:%llu, ",
+				dc->total_period_time[PERIOD_TOTAL], dc->total_period_time[PERIOD_READ], dc->total_period_time[PERIOD_WRITE]);
+		DMEMIT("time_hash:%llu, time_other:%llu, time_fp:%llu, time_l2p:%llu, time_ref:%llu, time_fua:%llu, time_io:%llu, time_gc:%llu, time_map:%llu, ",
 				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_OTHER], dc->total_period_time[PERIOD_FP], dc->total_period_time[PERIOD_L2P],
-				dc->total_period_time[PERIOD_REF], dc->total_period_time[PERIOD_FUA], dc->total_period_time[PERIOD_IO], dc->total_period_time[PERIOD_GC]);
-		DMEMIT("gc_count:%llu,gc_fp_count:%llu,", dc->gc_count, dc->gc_fp_count);
-		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
-				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
-		DMEMIT("invalid_fp:%llu,inserted_fp:%llu,", dc->invalid_fp, dc->inserted_fp);
-		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
+				dc->total_period_time[PERIOD_REF], dc->total_period_time[PERIOD_FUA], dc->total_period_time[PERIOD_IO], dc->total_period_time[PERIOD_GC],
+				dc->total_period_time[PERIOD_MAP]);
+		DMEMIT("gc_count:%llu,gc_fp_count:%llu, ", dc->gc_count, dc->gc_fp_count);
+		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu, ", dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
+		DMEMIT("invalid_fp:%llu,inserted_fp:%llu, ", dc->invalid_fp, dc->inserted_fp);
+		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu, ", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
+		DMEMIT("cycle_write:%llu, cycle_fp:%llu, cycle_meta_process:%llu, cycle_meta_io:%llu, cycle_raid_map:%llu", dc->total_period_time[PERIOD_WRITE],
+				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_META], dc->total_period_time[PERIOD_MIO], dc->total_period_time[PERIOD_MAP]);
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %u %s %s %d",
@@ -2286,6 +2296,7 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 
 static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 {
+	struct dm_bufio_client *c;
 	u32 id1, id2;
 	int err = 0;
 	sector_t dev_start = lpn * 8, dev_end = 8;
@@ -2294,6 +2305,8 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 
 	BUG_ON(!dc);
 	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
+	c = (struct dm_bufio_client *)(dc->mdops->get_bufio_client(dc->bmd));
+	c->total_io_time = 0;
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {

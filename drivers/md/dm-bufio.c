@@ -111,6 +111,8 @@ struct dm_bufio_client {
 	unsigned long long cntbio_write;
 	unsigned long long cntbio_sort[6];
 	unsigned long long cntbio_sort_r[6];
+	unsigned long long tmp_io_time;
+	unsigned long long total_io_time;
 	int rw;
 	struct list_head client_list;
 	struct shrinker shrinker;
@@ -164,6 +166,16 @@ struct dm_buffer {
 /*----------------------------------------------------------------*/
 
 #define dm_bufio_in_request()	(!!current->bio_list)
+
+static inline unsigned long read_tsc(void) {
+    unsigned long var;
+    unsigned int hi, lo;
+
+    asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+    var = ((unsigned long long int) hi << 32) | lo;
+    
+    return var;
+}
 
 static void dm_bufio_lock(struct dm_bufio_client *c)
 {
@@ -616,7 +628,9 @@ dmio:
 		ptr += this_step;
 	} while (len > 0);
 	//DMINFO("[rw=%d][bi_sector=0x%llx][bi_size=%u][blk_name=%s]", rw, (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_disk->disk_name);
+	b->c->tmp_io_time = read_tsc();
 	submit_bio(bio);
+	b->c->total_io_time += read_tsc() - b->c->tmp_io_time;
 	b->c->cntbio += 1;
 	if(rw == REQ_OP_WRITE) {
 		b->c->cntbio_write += 1;
