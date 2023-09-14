@@ -1225,8 +1225,7 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 
 	conf = mddev->private;
 	
-	if(bio_op(bio) == REQ_OP_WRITE)
-		calc_tsc(conf, RAID_WRITE, PERIOD_START);
+	calc_tsc(conf, RAID_RDWR, PERIOD_START);
 
 	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);
@@ -1336,24 +1335,21 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 		io->conf->io_count++;
 		io->conf->page_count++;
 	
-		calc_tsc(conf, RAID_IO_WRITE, PERIOD_START);
+		calc_tsc(conf, RAID_IO_RDWR, PERIOD_START);
 		r5_read_old(bio->bi_iter.bi_sector, tmp_dev->bdev, io);
-		calc_tsc(conf, RAID_IO_WRITE, PERIOD_END);
+		calc_tsc(conf, RAID_IO_RDWR, PERIOD_END);
 	}
 
-	if(bio_op(bio) == REQ_OP_WRITE)
-		calc_tsc(conf, RAID_IO_WRITE, PERIOD_START);
+	calc_tsc(conf, RAID_IO_RDWR, PERIOD_START);
 	if (mddev->gendisk)
 		trace_block_bio_remap(bio->bi_disk->queue, bio,
 				disk_devt(mddev->gendisk), bio_sector);
 	mddev_check_writesame(mddev, bio);
 	mddev_check_write_zeroes(mddev, bio);
 	generic_make_request(bio);
-	if(bio_op(bio) == REQ_OP_WRITE)
-		calc_tsc(conf, RAID_IO_WRITE, PERIOD_END);
+	calc_tsc(conf, RAID_IO_RDWR, PERIOD_END);
 
-	if(bio_op(bio) == REQ_OP_WRITE)
-		calc_tsc(conf, RAID_WRITE, PERIOD_END);
+	calc_tsc(conf, RAID_RDWR, PERIOD_END);
 
 	return true;
 }
@@ -1361,8 +1357,8 @@ static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 static void raid0_status(struct seq_file *seq, struct mddev *mddev)
 {
 	struct r0conf *conf = mddev->private;
-	u64 total = conf->total_period_time[RAID_WRITE] + conf->total_period_time[RAID_REMAP] + conf->total_period_time[RAID_DISCARD];
-	u64 total_io = conf->total_period_time[RAID_IO_WRITE] + conf->total_period_time[RAID_IO_REMAP] + conf->total_period_time[RAID_IO_DISCARD];
+	u64 total = conf->total_period_time[RAID_RDWR] + conf->total_period_time[RAID_REMAP] + conf->total_period_time[RAID_DISCARD];
+	u64 total_io = conf->total_period_time[RAID_IO_RDWR] + conf->total_period_time[RAID_IO_REMAP] + conf->total_period_time[RAID_IO_DISCARD];
 	u64 process = total - total_io;
 	seq_printf(seq, " %dk chunks", mddev->chunk_sectors / 2);
 	seq_printf(seq, "\ntotal cycles: %llu, process cycles: %llu, io cycles: %llu\n", total, process, total_io);

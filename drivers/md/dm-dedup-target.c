@@ -354,9 +354,13 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
 		clone->bi_read_hint = calculate_entry_offset(dc, lbn);
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
+		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		do_io(dc, clone, lbn);
+		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 	} else {
+		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		do_io(dc, clone, lbn);
+		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 	}
 
 	return 0;
@@ -425,7 +429,9 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 		clone->bi_private = io;
 
 read_no_fec:
+		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		do_io(dc, clone, lbnpbn_value.pbn);
+		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 	} else {
 		goto out;
 	}
@@ -2114,7 +2120,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_free_block_count = data_total_block_count - data_used_block_count;	
 		dc->total_period_time[PERIOD_OTHER] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH];
 		dc->total_period_time[PERIOD_MIO] = c->total_io_time;
-		dc->total_period_time[PERIOD_META] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH] - \
+		dc->total_period_time[PERIOD_META] = dc->total_period_time[PERIOD_READ] + dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH] - \
 				dc->total_period_time[PERIOD_MIO] - dc->total_period_time[PERIOD_MAP] - dc->total_period_time[PERIOD_IO] ;
 
 		DMEMIT("usr_total_cnt:%llu,usr_write_cnt:%llu,usr_reads_cnt:%llu,", dc->usr_total_cnt, dc->usr_write_cnt, dc->usr_reads_cnt);
@@ -2134,7 +2140,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu, ", dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
 		DMEMIT("invalid_fp:%llu,inserted_fp:%llu, ", dc->invalid_fp, dc->inserted_fp);
 		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu, ", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
-		DMEMIT("cycle_write:%llu, cycle_fp:%llu, cycle_meta_process:%llu, cycle_meta_io:%llu, cycle_raid_map:%llu", dc->total_period_time[PERIOD_WRITE],
+		DMEMIT("cycle_total:%llu, cycle_fp:%llu, cycle_meta_process:%llu, cycle_meta_io:%llu, cycle_raid_map:%llu", dc->total_period_time[PERIOD_WRITE] + dc->total_period_time[PERIOD_READ],
 				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_META], dc->total_period_time[PERIOD_MIO], dc->total_period_time[PERIOD_MAP]);
 		break;
 	case STATUSTYPE_TABLE:

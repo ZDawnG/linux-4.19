@@ -8,10 +8,10 @@
 #include <linux/mempool.h>
 
 enum {
-	RAID_WRITE = 0,
+	RAID_RDWR = 0,
 	RAID_REMAP,
 	RAID_DISCARD,
-	RAID_IO_WRITE,
+	RAID_IO_RDWR,
 	RAID_IO_REMAP,
 	RAID_IO_DISCARD,
 	RAID_NUM
