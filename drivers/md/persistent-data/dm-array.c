@@ -71,6 +71,8 @@ struct dm_bufio_client {
 	unsigned long long cntbio_write;
 	unsigned long long cntbio_sort[6];
 	unsigned long long cntbio_sort_r[6];
+	unsigned long long tmp_io_time;
+	unsigned long long total_io_time;
 	int rw;
 	struct list_head client_list;
 	struct shrinker shrinker;
