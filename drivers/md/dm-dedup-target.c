@@ -262,7 +262,7 @@ static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn) {
 		u64 len = dc->remote_len / ssdnum * (ssdnum - 1);
 		offset = lpn % len;
 		tmp = offset % (ssdnum - 1);
-		offset = offset / (ssdnum - 1) * ssdnum;
+		offset = offset / (ssdnum - 1) * ssdnum + (offset % (ssdnum - 1));
 		if(tmp >= pd_idx)
 			offset += 1;
 	}
@@ -2294,7 +2294,7 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 	BUG_ON(!dc);
 	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	if (!strcmp(dc->backend_str, "xremap")) {
-		entry_offset = calculate_entry_offset(dc, dev_start);
+		entry_offset = calculate_entry_offset(dc, lpn);
 		isremote = (id1 != id2) ? 1 : 0;
 	}
 	else {
@@ -2345,7 +2345,7 @@ static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last)
 	int err = 0;
 	
 	sector_t dev_start = lpn1 * 8, dev_end = 8, dev_s2 = lpn2 * 8;
-	u64 entry_offset = calculate_entry_offset(dc, dev_s2);
+	u64 entry_offset = calculate_entry_offset(dc, lpn2);
 	id1 = calculate_tarSSD(dc, lpn1);
 	id2 = calculate_tarSSD(dc, lpn2);
 
