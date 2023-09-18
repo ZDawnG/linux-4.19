@@ -251,18 +251,19 @@ static int calculate_tarSSD(struct dedup_config *dc, u64 lpn) {
 	return tmp;
 }
 
-static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn) {
+static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn, int target) {
 	u64 offset =0;
 	if(dc->remote_len)
 		offset = lpn % (dc->remote_len);
 	if(dc->raid_mode && dc->remote_len) {
 		u64 tmp;
+		int pd_idx;
 		int ssdnum = dc->ssd_num;
-		int pd_idx = (ssdnum - 1) - calculate_tarSSD(dc, lpn);
 		u64 len = dc->remote_len / ssdnum * (ssdnum - 1);
 		offset = lpn % len;
 		tmp = offset % (ssdnum - 1);
 		offset = offset / (ssdnum - 1) * ssdnum + (offset % (ssdnum - 1));
+		pd_idx = (ssdnum - 1) - (target % ssdnum);
 		if(tmp >= pd_idx)
 			offset += 1;
 	}
@@ -352,7 +353,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 		/* entry found in the LBN->tv store and is a remoteread*/
 		lbn = remap_tarSSD(dc, lbn, t, tv.ver);
 		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
-		clone->bi_read_hint = calculate_entry_offset(dc, lbn);
+		clone->bi_read_hint = calculate_entry_offset(dc, lbn, tv.ver);
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
 		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		do_io(dc, clone, lbn);
@@ -899,7 +900,7 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 	if(oldno == calculate_tarSSD(dc, lpn)) {
 		return 0;
 	}
-	base = calculate_entry_offset(dc, lpn);
+	base = calculate_entry_offset(dc, lpn, oldno);
 	if (dc->raid_mode) {
 		int pd_idx, raid_disk;
 		raid_disk = dc->ssd_num;
@@ -2294,7 +2295,7 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 	BUG_ON(!dc);
 	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	if (!strcmp(dc->backend_str, "xremap")) {
-		entry_offset = calculate_entry_offset(dc, lpn);
+		entry_offset = calculate_entry_offset(dc, lpn, id1);
 		isremote = (id1 != id2) ? 1 : 0;
 	}
 	else {
@@ -2342,12 +2343,13 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last)
 {
 	u32 id1, id2, isremote, isupdate;
+	u64 entry_offset;
 	int err = 0;
 	
 	sector_t dev_start = lpn1 * 8, dev_end = 8, dev_s2 = lpn2 * 8;
-	u64 entry_offset = calculate_entry_offset(dc, lpn2);
 	id1 = calculate_tarSSD(dc, lpn1);
 	id2 = calculate_tarSSD(dc, lpn2);
+	entry_offset = calculate_entry_offset(dc, lpn2, id1);
 
 	BUG_ON(!dc);
 
